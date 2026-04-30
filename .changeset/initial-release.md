@@ -2,11 +2,14 @@
 "@voyantjs/cli": minor
 ---
 
-First release of `@voyantjs/cli` from the dedicated `voyantjs/cli` repo.
+First release of `@voyantjs/cli` from the dedicated `voyantjs/cli` repo —
+published as `0.20.0` (the `0.19.0` version was already shipped from
+`voyantjs/voyant` before that repo's `packages/cli` was privatized; from
+this point on, all `@voyantjs/cli` releases come from `voyantjs/cli`).
 
 This is the unified CLI for the Voyant open-source framework AND the Voyant
-Cloud platform — replacing the in-monorepo `@voyantjs/cli@0.18.x` that
-previously shipped from `voyantjs/voyant`.
+Cloud platform — replacing the in-monorepo `@voyantjs/cli@0.18.x`/`0.19.0`
+that previously shipped from `voyantjs/voyant`.
 
 **Open source (no login required):**
 
