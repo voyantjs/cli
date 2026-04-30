@@ -1,32 +1,24 @@
 {
-  "name": "cloud-sdk",
+  "name": "@voyantjs/cli-workspace",
   "private": true,
   "scripts": {
-    "build": "pnpm -r --if-present run build",
+    "build": "turbo run build",
+    "check-types": "turbo run check-types",
+    "test": "turbo run test",
+    "lint": "biome check .",
+    "format": "biome check --write .",
     "changeset": "changeset",
-    "dev": "turbo run dev",
-    "lint": "pnpm -r --if-present run lint",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
-    "check-types": "pnpm -r --if-present run check-types",
-    "release": "pnpm verify && changeset publish",
-    "sync:contracts": "node scripts/sync-route-manifests.mjs",
-    "test": "node --test tests/*.test.mjs",
-    "verify": "pnpm check-types && pnpm lint && pnpm build && pnpm test && pnpm verify:client-route-coverage && pnpm verify:api-parity && pnpm verify:package-artifacts && pnpm verify:package-manifests && pnpm verify:readmes",
-    "verify:api-parity": "node scripts/verify-api-parity.mjs",
-    "verify:client-route-coverage": "node scripts/verify-client-route-coverage.mjs",
-    "verify:package-artifacts": "node scripts/verify-package-artifacts.mjs",
-    "verify:package-manifests": "node scripts/verify-package-manifests.mjs",
-    "verify:readmes": "node scripts/verify-readmes.mjs",
-    "version-packages": "node scripts/version-packages.mjs"
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.10",
     "@changesets/cli": "^2.29.7",
-    "prettier": "^3.7.4",
     "turbo": "^2.9.6",
     "typescript": "5.9.2"
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }

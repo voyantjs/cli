@@ -1,35 +1,34 @@
 # Contributing
 
-This repo publishes public TypeScript SDK packages for hosted Voyant products.
+This repo publishes the unified `@voyantjs/cli` binary.
 
 ## Scope
 
-Changes here should improve:
+- OSS commands that scaffold and run Voyant projects without authentication
+- Cloud commands that talk to Voyant Cloud over HTTP via `@voyantjs/cloud-sdk`
+- Shared CLI infrastructure (arg parsing, credentials, config loading,
+  template fetching)
 
-- public package ergonomics
-- request and response typing
-- transport reliability
-- release quality
-- SDK-facing documentation
-
-Changes here should not pull in private `voyant-cloud` implementation details.
+Out of scope: server-side code (lives in `voyant-cloud`), framework runtime
+(lives in `voyantjs/voyant`).
 
 ## Working rules
 
-- keep `@voyant-sdk/sdk-core` small and transport-focused
-- do not add product-specific business logic to shared packages
-- prefer stable public naming over mirroring internal service naming exactly
-- write Markdown docs in this repo, not a docs app
+- Keep commands thin — push reusable logic into `lib/` so the same code is
+  callable both from the CLI and programmatically
+- Cloud commands must work without the `voyant` framework being installed
+- OSS commands must work without a Voyant Cloud login
+- Credentials never get logged
 
-## Before publishing
+## Before opening a PR
 
-- typecheck the workspace
-- lint changed packages
-- verify package exports and examples still match the public API shape
-- make sure docs mention any user-visible change in auth, request shape, or
-  package boundaries
+```sh
+pnpm check-types
+pnpm test
+pnpm build
+```
 
-## Contract updates
+## Releases
 
-When the API contract changes in `voyant-cloud`, update the relevant SDK package
-without importing private application code directly.
+Add a changeset (`pnpm changeset`) for any user-visible change. CI opens a
+release PR; merging it publishes to npm.

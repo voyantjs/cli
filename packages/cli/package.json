@@ -1,0 +1,200 @@
+{
+  "name": "@voyantjs/cli",
+  "version": "0.19.0",
+  "license": "Apache-2.0",
+  "description": "Unified CLI for the Voyant open-source framework and the Voyant Cloud platform.",
+  "type": "module",
+  "bin": {
+    "voyant": "./bin/voyant.mjs"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./drizzle": "./src/drizzle.ts",
+    "./commands/generate-module": "./src/commands/generate-module.ts",
+    "./commands/generate-link": "./src/commands/generate-link.ts",
+    "./commands/config": "./src/commands/config.ts",
+    "./commands/db-sync-links": "./src/commands/db-sync-links.ts",
+    "./commands/db-schemas": "./src/commands/db-schemas.ts",
+    "./commands/exec": "./src/commands/exec.ts",
+    "./commands/new": "./src/commands/new.ts",
+    "./commands/dev": "./src/commands/dev.ts",
+    "./commands/workflows": "./src/commands/workflows-command.ts",
+    "./commands/login": "./src/commands/login.ts",
+    "./commands/logout": "./src/commands/logout.ts",
+    "./commands/whoami": "./src/commands/whoami.ts",
+    "./commands/vaults": "./src/commands/vaults.ts",
+    "./commands/secrets": "./src/commands/secrets.ts",
+    "./lib/strings": "./src/lib/strings.ts",
+    "./lib/args": "./src/lib/args.ts",
+    "./lib/config-loader": "./src/lib/config-loader.ts",
+    "./lib/resolve-schemas": "./src/lib/resolve-schemas.ts",
+    "./lib/credentials": "./src/lib/credentials.ts",
+    "./lib/cloud-client": "./src/lib/cloud-client.ts",
+    "./lib/device-code": "./src/lib/device-code.ts",
+    "./lib/voyant-version": "./src/lib/voyant-version.ts"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check-types": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "format": "biome check --write src tests",
+    "test": "vitest run",
+    "clean": "rm -rf dist",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@voyantjs/cloud-sdk": "^0.6.1",
+    "@voyantjs/core": "^0.18.0",
+    "@voyantjs/workflows": "^0.18.0",
+    "@voyantjs/workflows-orchestrator": "^0.18.0",
+    "@voyantjs/workflows-orchestrator-node": "^0.18.0",
+    "esbuild": "^0.28.0",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@voyantjs/cli-tsconfig": "workspace:*",
+    "typescript": "5.9.2",
+    "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js",
+        "default": "./dist/index.js"
+      },
+      "./drizzle": {
+        "types": "./dist/drizzle.d.ts",
+        "import": "./dist/drizzle.js",
+        "default": "./dist/drizzle.js"
+      },
+      "./commands/generate-module": {
+        "types": "./dist/commands/generate-module.d.ts",
+        "import": "./dist/commands/generate-module.js",
+        "default": "./dist/commands/generate-module.js"
+      },
+      "./commands/generate-link": {
+        "types": "./dist/commands/generate-link.d.ts",
+        "import": "./dist/commands/generate-link.js",
+        "default": "./dist/commands/generate-link.js"
+      },
+      "./commands/config": {
+        "types": "./dist/commands/config.d.ts",
+        "import": "./dist/commands/config.js",
+        "default": "./dist/commands/config.js"
+      },
+      "./commands/db-sync-links": {
+        "types": "./dist/commands/db-sync-links.d.ts",
+        "import": "./dist/commands/db-sync-links.js",
+        "default": "./dist/commands/db-sync-links.js"
+      },
+      "./commands/db-schemas": {
+        "types": "./dist/commands/db-schemas.d.ts",
+        "import": "./dist/commands/db-schemas.js",
+        "default": "./dist/commands/db-schemas.js"
+      },
+      "./commands/exec": {
+        "types": "./dist/commands/exec.d.ts",
+        "import": "./dist/commands/exec.js",
+        "default": "./dist/commands/exec.js"
+      },
+      "./commands/new": {
+        "types": "./dist/commands/new.d.ts",
+        "import": "./dist/commands/new.js",
+        "default": "./dist/commands/new.js"
+      },
+      "./commands/dev": {
+        "types": "./dist/commands/dev.d.ts",
+        "import": "./dist/commands/dev.js",
+        "default": "./dist/commands/dev.js"
+      },
+      "./commands/workflows": {
+        "types": "./dist/commands/workflows-command.d.ts",
+        "import": "./dist/commands/workflows-command.js",
+        "default": "./dist/commands/workflows-command.js"
+      },
+      "./commands/login": {
+        "types": "./dist/commands/login.d.ts",
+        "import": "./dist/commands/login.js",
+        "default": "./dist/commands/login.js"
+      },
+      "./commands/logout": {
+        "types": "./dist/commands/logout.d.ts",
+        "import": "./dist/commands/logout.js",
+        "default": "./dist/commands/logout.js"
+      },
+      "./commands/whoami": {
+        "types": "./dist/commands/whoami.d.ts",
+        "import": "./dist/commands/whoami.js",
+        "default": "./dist/commands/whoami.js"
+      },
+      "./commands/vaults": {
+        "types": "./dist/commands/vaults.d.ts",
+        "import": "./dist/commands/vaults.js",
+        "default": "./dist/commands/vaults.js"
+      },
+      "./commands/secrets": {
+        "types": "./dist/commands/secrets.d.ts",
+        "import": "./dist/commands/secrets.js",
+        "default": "./dist/commands/secrets.js"
+      },
+      "./lib/strings": {
+        "types": "./dist/lib/strings.d.ts",
+        "import": "./dist/lib/strings.js",
+        "default": "./dist/lib/strings.js"
+      },
+      "./lib/args": {
+        "types": "./dist/lib/args.d.ts",
+        "import": "./dist/lib/args.js",
+        "default": "./dist/lib/args.js"
+      },
+      "./lib/config-loader": {
+        "types": "./dist/lib/config-loader.d.ts",
+        "import": "./dist/lib/config-loader.js",
+        "default": "./dist/lib/config-loader.js"
+      },
+      "./lib/resolve-schemas": {
+        "types": "./dist/lib/resolve-schemas.d.ts",
+        "import": "./dist/lib/resolve-schemas.js",
+        "default": "./dist/lib/resolve-schemas.js"
+      },
+      "./lib/credentials": {
+        "types": "./dist/lib/credentials.d.ts",
+        "import": "./dist/lib/credentials.js",
+        "default": "./dist/lib/credentials.js"
+      },
+      "./lib/cloud-client": {
+        "types": "./dist/lib/cloud-client.d.ts",
+        "import": "./dist/lib/cloud-client.js",
+        "default": "./dist/lib/cloud-client.js"
+      },
+      "./lib/device-code": {
+        "types": "./dist/lib/device-code.d.ts",
+        "import": "./dist/lib/device-code.js",
+        "default": "./dist/lib/device-code.js"
+      },
+      "./lib/voyant-version": {
+        "types": "./dist/lib/voyant-version.d.ts",
+        "import": "./dist/lib/voyant-version.js",
+        "default": "./dist/lib/voyant-version.js"
+      }
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/voyantjs/cli.git",
+    "directory": "packages/cli"
+  }
+}

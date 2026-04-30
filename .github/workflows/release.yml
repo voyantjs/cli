@@ -32,15 +32,21 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 20
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Verify
-        run: pnpm verify
+      - name: Type check
+        run: pnpm check-types
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
 
       - name: Create Release PR or Publish
         id: changesets
@@ -58,7 +64,7 @@ jobs:
         if: steps.changesets.outputs.published == 'true'
         id: version
         run: |
-          VERSION=$(node -p "require('./packages/cloud-sdk/package.json').version")
+          VERSION=$(node -p "require('./packages/cli/package.json').version")
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Tag release
