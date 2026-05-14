@@ -1,5 +1,11 @@
 # @voyantjs/cli
 
+## 0.20.1
+
+### Patch Changes
+
+- f47c30c: Fix node workflow builds that load bundled CommonJS dependencies with dynamic requires of Node built-ins.
+
 ## 0.20.0
 
 ### Minor Changes
