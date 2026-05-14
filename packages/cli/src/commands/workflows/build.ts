@@ -115,6 +115,7 @@ export function createEsbuildBundler(): Bundler {
         format: "esm",
         target: "es2022",
         platform,
+        banner: platform === "node" ? { js: NODE_REQUIRE_BANNER } : undefined,
         minify,
         sourcemap,
         logLevel: "silent",
@@ -137,3 +138,8 @@ export function createEsbuildBundler(): Bundler {
     },
   }
 }
+
+const NODE_REQUIRE_BANNER = [
+  `import { createRequire as __voyantCreateRequire } from "node:module";`,
+  `const require = __voyantCreateRequire(import.meta.url);`,
+].join("\n")

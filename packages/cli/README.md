@@ -48,6 +48,17 @@ Cloud commands accept these inputs in priority order:
 `--api-url <url>` and `VOYANT_CLOUD_API_URL` likewise override the default
 `https://api.voyantjs.com`.
 
+## Workflow bundles
+
+`voyant workflows build --platform node` emits `bundle.mjs` for Node's native
+ESM loader and expects the bundle to be imported from a filesystem path or
+`file:` URL. Node bundles may include a `createRequire(import.meta.url)` shim so
+valid Node dependencies that dynamically require built-ins such as `stream` can
+load during manifest extraction and in the self-hosted Node runner.
+
+Use `--platform neutral` or `--platform browser` for runtimes that do not load
+workflow bundles from the filesystem.
+
 ## Programmatic use
 
 `@voyantjs/cli` exposes its lib helpers and command handlers for embedding
