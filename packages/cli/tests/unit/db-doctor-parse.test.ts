@@ -75,4 +75,28 @@ describe("parseDrizzleConfig", () => {
     const source = `export default defineConfig({ schema: ["./a.ts"] })`
     expect(parseDrizzleConfig(source).out).toBe("./drizzle")
   })
+
+  it("flags derived schemas that include local schemas (generated manifest import)", () => {
+    const source = `
+      import { schema } from "./drizzle.schemas.generated.ts"
+      export default defineConfig({ schema: [...schema], out: "./migrations" })
+    `
+    expect(parseDrizzleConfig(source).derivedIncludesLocalSchemas).toBe(true)
+  })
+
+  it("flags derived schemas that include local schemas (resolveSchemaManifest)", () => {
+    const source = `
+      import { resolveSchemaManifest } from "@voyantjs/cli/drizzle"
+      export default defineConfig({ schema: resolveSchemaManifest(config), out: "./migrations" })
+    `
+    expect(parseDrizzleConfig(source).derivedIncludesLocalSchemas).toBe(true)
+  })
+
+  it("does NOT flag a bare resolveSchemas() (omits template-local schemas)", () => {
+    const source = `
+      import { resolveSchemas } from "@voyantjs/cli/drizzle"
+      export default defineConfig({ schema: resolveSchemas(config), out: "./migrations" })
+    `
+    expect(parseDrizzleConfig(source).derivedIncludesLocalSchemas).toBe(false)
+  })
 })

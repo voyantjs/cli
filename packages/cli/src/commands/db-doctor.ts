@@ -129,10 +129,30 @@ function checkSchemaParity(
   }
 
   if (parsed.schemaEntries === null) {
-    notes.push(
-      "Schemas: drizzle.config `schema` is derived (not a string-literal list) — " +
-        "comparing the generated manifest instead.",
-    )
+    // Derived schema (e.g. `import { schema }` or `resolveSchemas(config)`).
+    // We can't compare literal entries, so the generated-manifest freshness
+    // check carries correctness — but ONLY if drizzle.config actually consumes
+    // a source that includes the template-local `schemas` (the generated
+    // manifest or `resolveSchemaManifest`). A bare `resolveSchemas(config)`
+    // omits local `schemas`, which would then silently miss migrations.
+    const localSchemas = config.schemas ?? []
+    if (parsed.derivedIncludesLocalSchemas) {
+      notes.push(
+        "Schemas: drizzle.config derives its schema from the manifest " +
+          "(packages + template-local schemas covered).",
+      )
+    } else if (localSchemas.length > 0) {
+      issues.push({
+        message:
+          "drizzle.config derives its schema without the generated manifest / " +
+          "resolveSchemaManifest, so template-local schemas are likely OMITTED from migrations:",
+        details: localSchemas.map(String),
+      })
+    } else {
+      notes.push(
+        "Schemas: drizzle.config `schema` is derived; no template-local schemas to verify.",
+      )
+    }
     return
   }
 
@@ -277,11 +297,23 @@ interface ParsedDrizzleConfig {
   schemaEntries: string[] | null
   /** The `out` directory (relative to the template), defaulting to "./drizzle". */
   out: string
+  /**
+   * For the derived case: whether the config consumes a source that includes
+   * template-local `schemas` — the generated manifest (`drizzle.schemas.generated`)
+   * or `resolveSchemaManifest`. A bare `resolveSchemas(config)` does NOT, so
+   * local schemas would be dropped.
+   */
+  derivedIncludesLocalSchemas: boolean
 }
 
 export function parseDrizzleConfig(source: string): ParsedDrizzleConfig {
   const text = stripComments(source)
-  return { schemaEntries: extractSchemaEntries(text), out: extractOut(text) }
+  return {
+    schemaEntries: extractSchemaEntries(text),
+    out: extractOut(text),
+    derivedIncludesLocalSchemas:
+      /drizzle\.schemas\.generated/.test(text) || /\bresolveSchemaManifest\b/.test(text),
+  }
 }
 
 function extractSchemaEntries(text: string): string[] | null {

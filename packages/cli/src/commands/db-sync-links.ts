@@ -72,12 +72,21 @@ export async function dbSyncLinksCommand(ctx: CommandContext): Promise<CommandRe
   // voyant.config `schemas` so it flows into the schema manifest.
   if (flags["emit-drizzle"] === true) {
     const drizzleSchema = renderLinkDrizzleSchema(links)
+    // Default output goes into the SELECTED template (so it sits next to the
+    // template's voyant.config `schemas` that references it) — not the caller's
+    // cwd. An explicit --out is still resolved relative to cwd.
+    const templateRoot =
+      typeof flags.template === "string"
+        ? isAbsolute(flags.template)
+          ? flags.template
+          : resolve(ctx.cwd, flags.template)
+        : ctx.cwd
     const target =
       typeof flags.out === "string"
         ? isAbsolute(flags.out)
           ? flags.out
           : resolve(ctx.cwd, flags.out)
-        : resolve(ctx.cwd, "drizzle.links.generated.ts")
+        : resolve(templateRoot, "drizzle.links.generated.ts")
     try {
       writeFileSync(target, drizzleSchema)
     } catch (err) {
