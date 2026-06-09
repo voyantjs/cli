@@ -27,7 +27,7 @@ import { dbSyncLinksCommand } from "./db-sync-links.js"
  */
 export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
   const { positionals, flags } = parseArgs(ctx.argv)
-  const [sub, ...rest] = positionals
+  const sub = positionals[0]
   if (!sub) {
     ctx.stderr(
       "Usage: voyant db <generate|migrate|studio|push|check|sync-links|schemas|doctor> [...args]\n",
@@ -77,7 +77,7 @@ export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
     }
   }
 
-  const args = ["drizzle-kit", sub, ...rest]
+  const args = buildDrizzleArgs(sub, ctx.argv.slice(ctx.argv.indexOf(sub) + 1))
   ctx.stdout(`> pnpm -C ${templateDir} ${args.join(" ")}\n`)
 
   return new Promise((resolve) => {
@@ -99,4 +99,36 @@ function resolveTemplateDir(cwd: string, override: string | boolean | undefined)
   }
   if (existsSync(join(cwd, "drizzle.config.ts"))) return cwd
   return null
+}
+
+/**
+ * Build the drizzle-kit argv for a proxied subcommand. Forwards everything
+ * after the subcommand (so --name, --prefix, etc. pass through), strips the
+ * CLI-consumed --template, and defaults `generate` to `--prefix timestamp`
+ * (overridable) for collision-free deterministic ordering.
+ */
+export function buildDrizzleArgs(sub: string, argvAfterSub: readonly string[]): string[] {
+  const passthrough = stripTemplateFlag(argvAfterSub)
+  if (
+    sub === "generate" &&
+    !passthrough.some((arg) => arg === "--prefix" || arg.startsWith("--prefix="))
+  ) {
+    passthrough.push("--prefix", "timestamp")
+  }
+  return ["drizzle-kit", sub, ...passthrough]
+}
+
+/** Drop the CLI-consumed `--template <path>` / `--template=<path>` from argv. */
+function stripTemplateFlag(argv: readonly string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string
+    if (arg === "--template") {
+      i++ // also skip its value
+      continue
+    }
+    if (arg.startsWith("--template=")) continue
+    out.push(arg)
+  }
+  return out
 }

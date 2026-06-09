@@ -230,16 +230,54 @@ function checkDuplicatePrefixes(
     const prefix = match[1] as string
     byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), entry.name])
   }
-  const dupes = [...byPrefix.entries()].filter(([, files]) => files.length > 1)
+  const dupes = [...byPrefix.entries()]
+    .filter(([, files]) => files.length > 1)
+    .map(([prefix, files]) => ({ prefix, files: [...files].sort() }))
   if (dupes.length === 0) {
     notes.push("Migrations: no duplicate sequence prefixes.")
     return
   }
-  for (const [prefix, files] of dupes) {
+
+  // Grandfather pre-existing duplicates via a committed baseline so the gate
+  // fails only on NEW collisions. A baselined entry must match the exact file
+  // set, so adding another file to an existing duplicate prefix still trips.
+  const baseline = loadDuplicatePrefixBaseline(outDir)
+  const baselined = dupes.filter((d) => baseline.get(d.prefix) === d.files.join("|"))
+  const unbaselined = dupes.filter((d) => baseline.get(d.prefix) !== d.files.join("|"))
+
+  if (baselined.length > 0) {
+    notes.push(
+      `Migrations: ${baselined.length} pre-existing duplicate prefix(es) grandfathered by ` +
+        `${DUPLICATE_PREFIX_BASELINE_NAME}.`,
+    )
+  }
+  for (const { prefix, files } of unbaselined) {
     issues.push({
-      message: `Duplicate migration prefix "${prefix}" — order is non-deterministic:`,
-      details: files.sort(),
+      message: `Duplicate migration prefix "${prefix}" — order is non-deterministic (not baselined):`,
+      details: files,
     })
+  }
+}
+
+const DUPLICATE_PREFIX_BASELINE_NAME = "duplicate-prefixes.baseline.json"
+
+/** Load the duplicate-prefix baseline as prefix → sorted-files key. */
+function loadDuplicatePrefixBaseline(outDir: string): Map<string, string> {
+  const path = join(outDir, DUPLICATE_PREFIX_BASELINE_NAME)
+  if (!existsSync(path)) return new Map()
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      duplicates?: Array<{ prefix?: string; files?: string[] }>
+    }
+    const map = new Map<string, string>()
+    for (const entry of parsed.duplicates ?? []) {
+      if (typeof entry.prefix === "string" && Array.isArray(entry.files)) {
+        map.set(entry.prefix, [...entry.files].sort().join("|"))
+      }
+    }
+    return map
+  } catch {
+    return new Map()
   }
 }
 

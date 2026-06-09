@@ -11,8 +11,10 @@ OPEN-SOURCE COMMANDS
   generate link <a> <b>              Emit a defineLink snippet (a, b as <module>.<entity>)
   config <show|validate|path>        Inspect the nearest voyant.config.* manifest
   dev --file <path>                  Watch and serve workflows locally with hot reload
-  db <generate|migrate|studio|push>  Proxy drizzle-kit commands to the nearest template
-  db sync-links                      Emit SQL DDL for cross-module link tables
+  db <generate|migrate|studio|push>  Proxy drizzle-kit commands (generate defaults to --prefix timestamp)
+  db schemas [--emit]                Print/emit the manifest-derived schema list
+  db sync-links [--emit-drizzle]     Emit link-table DDL, or a generated Drizzle schema
+  db doctor [--fail-on-drift]        Report migration drift (manifest/schema/prefix/link checks)
   exec <script.ts> [args...]         Run a TS/JS script with the voyant loader hook
   workflows <subcommand>             Build, serve, inspect, and self-host workflows
 
