@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url"
 import { generateLinkTableSql, type LinkDefinition } from "@voyantjs/core/links"
 
 import { parseArgs } from "../lib/args.js"
+import { renderLinkDrizzleSchema } from "../lib/link-schema.js"
 import type { CommandContext, CommandResult } from "../types.js"
 
 /**
@@ -65,6 +66,30 @@ export async function dbSyncLinksCommand(ctx: CommandContext): Promise<CommandRe
     return 1
   }
 
+  // --emit-drizzle → write a generated Drizzle schema module so link tables are
+  // folded into the migration snapshot (Drizzle owns the diff) instead of being
+  // applied out-of-band as raw DDL. Add the emitted file to the template's
+  // voyant.config `schemas` so it flows into the schema manifest.
+  if (flags["emit-drizzle"] === true) {
+    const drizzleSchema = renderLinkDrizzleSchema(links)
+    const target =
+      typeof flags.out === "string"
+        ? isAbsolute(flags.out)
+          ? flags.out
+          : resolve(ctx.cwd, flags.out)
+        : resolve(ctx.cwd, "drizzle.links.generated.ts")
+    try {
+      writeFileSync(target, drizzleSchema)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      ctx.stderr(`Failed to write ${target}: ${reason}\n`)
+      return 1
+    }
+    const materialized = links.filter((l) => !l.readOnly).length
+    ctx.stdout(`Wrote ${materialized} link table definition(s) to ${target}\n`)
+    return 0
+  }
+
   const sql = renderLinksSql(links, linksPath)
 
   const outFlag = flags.out
@@ -85,7 +110,10 @@ export async function dbSyncLinksCommand(ctx: CommandContext): Promise<CommandRe
   return 0
 }
 
-function resolveLinksPath(cwd: string, flags: Record<string, string | boolean>): string | null {
+export function resolveLinksPath(
+  cwd: string,
+  flags: Record<string, string | boolean>,
+): string | null {
   // --links <path> takes priority.
   if (typeof flags.links === "string") {
     const abs = isAbsolute(flags.links) ? flags.links : resolve(cwd, flags.links)
@@ -108,7 +136,7 @@ function resolveLinksPath(cwd: string, flags: Record<string, string | boolean>):
   return null
 }
 
-async function loadLinks(absPath: string): Promise<LinkDefinition[]> {
+export async function loadLinks(absPath: string): Promise<LinkDefinition[]> {
   const isTypeScript = /\.(m|c)?ts$/i.test(absPath)
   const raw = isTypeScript
     ? await loadLinksViaSubprocess(absPath)

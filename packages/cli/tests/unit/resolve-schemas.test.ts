@@ -123,4 +123,58 @@ describe("resolveSchemas", () => {
     )
     expect(result).toEqual(["@voyantjs/db/schema", "@voyantjs/crm/schema"])
   })
+
+  it("seeds the closure from additionalSchemas alongside modules", () => {
+    seedModule(tmp, "@voyantjs/db", { schema: "./schema", requiresSchemas: [] })
+    seedModule(tmp, "@voyantjs/crm", { schema: "./schema", requiresSchemas: ["@voyantjs/db"] })
+    seedModule(tmp, "@voyantjs/catalog", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+
+    const result = resolveSchemas(
+      { modules: ["@voyantjs/crm"], additionalSchemas: ["@voyantjs/catalog"] },
+      { cwd: tmp },
+    )
+
+    expect(result).toContain("@voyantjs/crm/schema")
+    expect(result).toContain("@voyantjs/catalog/schema")
+    expect(result).toContain("@voyantjs/db/schema")
+  })
+
+  it("walks requiresSchemas transitively for additionalSchemas entries", () => {
+    seedModule(tmp, "@voyantjs/db", null)
+    seedModule(tmp, "@voyantjs/facilities", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+    seedModule(tmp, "@voyantjs/accommodations", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db", "@voyantjs/facilities"],
+    })
+
+    // accommodations is migrated but not mounted as a module.
+    const result = resolveSchemas(
+      { modules: [], additionalSchemas: ["@voyantjs/accommodations"] },
+      { cwd: tmp },
+    )
+
+    expect(result).toEqual([
+      "@voyantjs/db/schema",
+      "@voyantjs/facilities/schema",
+      "@voyantjs/accommodations/schema",
+    ])
+  })
+
+  it("honors a non-default schema subpath from the manifest", () => {
+    seedModule(tmp, "@voyantjs/db", null)
+    seedModule(tmp, "@voyantjs/flights", {
+      schema: "./reference/local-postgres",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+
+    const result = resolveSchemas({ additionalSchemas: ["@voyantjs/flights"] }, { cwd: tmp })
+
+    expect(result).toContain("@voyantjs/flights/reference/local-postgres")
+  })
 })

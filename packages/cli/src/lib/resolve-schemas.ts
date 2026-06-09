@@ -8,6 +8,22 @@ import { resolveEntry } from "@voyantjs/core/config"
 /** Output mode for {@link resolveSchemas}. */
 export type SchemaResolutionStyle = "specifier" | "file"
 
+/**
+ * Config shape the resolver reads. `additionalSchemas` is not yet part of the
+ * published `@voyantjs/core` `VoyantConfig` type, so it is augmented here and
+ * read off the manifest at runtime. It lists schema-owning packages a template
+ * **migrates but does not mount as a Hono module** — plugin-provided schemas
+ * (e.g. catalog behind a bridge bundle) and FK-target packages (e.g.
+ * accommodations). Entries seed schema resolution exactly like `modules`, so
+ * their tables (and transitive `requiresSchemas`) are included — keeping
+ * `modules` an honest list of what is actually mounted.
+ */
+export type SchemaSeedConfig = VoyantConfig & {
+  /** Mounted Hono extensions that own tables — seeded like `modules`. */
+  extensions?: VoyantConfig["modules"]
+  additionalSchemas?: VoyantConfig["modules"]
+}
+
 /** Options for {@link resolveSchemas}. */
 export interface ResolveSchemasOptions {
   /** Working directory (defaults to `process.cwd()`). */
@@ -48,12 +64,19 @@ interface VoyantPackageManifest {
  * ```
  */
 export function resolveSchemas(
-  config: VoyantConfig,
+  config: SchemaSeedConfig,
   options: ResolveSchemasOptions = {},
 ): string[] {
   const cwd = options.cwd ?? process.cwd()
   const style = options.style ?? "specifier"
-  const seeds = (config.modules ?? []).map((entry) => resolveEntry(entry).resolve)
+  // Seed from mounted modules, mounted extensions, AND non-mounted
+  // schema-owning packages (`additionalSchemas`). All are walked for their
+  // `requiresSchemas` closure.
+  const seeds = [
+    ...(config.modules ?? []),
+    ...(config.extensions ?? []),
+    ...(config.additionalSchemas ?? []),
+  ].map((entry) => resolveEntry(entry).resolve)
   const order = expandClosure(seeds, cwd)
   return order.map((mod) => {
     const manifest = readManifest(mod, cwd)
@@ -118,7 +141,7 @@ function readManifest(mod: string, cwd: string): VoyantPackageManifest {
  * `<cwd>/packages/<basename>/package.json` so the resolver also works in the
  * voyant monorepo where modules may not be installed under `node_modules/`.
  */
-function resolvePackageJson(mod: string, cwd: string): string | null {
+export function resolvePackageJson(mod: string, cwd: string): string | null {
   // 1. Conventional install layout: <cwd>/node_modules/<mod>/package.json.
   const direct = join(cwd, "node_modules", mod, "package.json")
   if (existsSync(direct)) return direct

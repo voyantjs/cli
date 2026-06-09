@@ -3,7 +3,10 @@ import { existsSync } from "node:fs"
 import { join } from "node:path"
 
 import { parseArgs } from "../lib/args.js"
+import { writeSchemaManifest } from "../lib/schema-manifest.js"
+import { loadVoyantConfig } from "../lib/voyant-config.js"
 import type { CommandContext, CommandResult } from "../types.js"
+import { dbDoctorCommand } from "./db-doctor.js"
 import { dbSchemasCommand } from "./db-schemas.js"
 import { dbSyncLinksCommand } from "./db-sync-links.js"
 
@@ -27,7 +30,7 @@ export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
   const [sub, ...rest] = positionals
   if (!sub) {
     ctx.stderr(
-      "Usage: voyant db <generate|migrate|studio|push|check|sync-links|schemas> [...args]\n",
+      "Usage: voyant db <generate|migrate|studio|push|check|sync-links|schemas|doctor> [...args]\n",
     )
     return 1
   }
@@ -43,6 +46,11 @@ export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
     const subArgs = idx >= 0 ? ctx.argv.slice(idx + 1) : []
     return dbSchemasCommand({ ...ctx, argv: subArgs })
   }
+  if (sub === "doctor") {
+    const idx = ctx.argv.indexOf(sub)
+    const subArgs = idx >= 0 ? ctx.argv.slice(idx + 1) : []
+    return dbDoctorCommand({ ...ctx, argv: subArgs })
+  }
 
   const known = new Set(["generate", "migrate", "studio", "push", "check"])
   if (!known.has(sub)) {
@@ -57,6 +65,16 @@ export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
         "Run this command from the repo root, or pass --template <path>.\n",
     )
     return 1
+  }
+
+  // Keep the committed schema manifest fresh before generating a migration so
+  // drizzle-kit always sees the manifest-derived schema set.
+  if (sub === "generate") {
+    const config = await loadVoyantConfig(templateDir, null)
+    if (config) {
+      const generated = writeSchemaManifest(config, { cwd: templateDir })
+      ctx.stdout(`Wrote ${generated.entries.length} schema entrypoint(s) to ${generated.path}\n`)
+    }
   }
 
   const args = ["drizzle-kit", sub, ...rest]
