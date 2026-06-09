@@ -1,6 +1,6 @@
 {
   "name": "@voyantjs/cli",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "license": "Apache-2.0",
   "description": "Unified CLI for the Voyant open-source framework and the Voyant Cloud platform.",
   "type": "module",
