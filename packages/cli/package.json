@@ -15,6 +15,7 @@
     "./commands/config": "./src/commands/config.ts",
     "./commands/db-sync-links": "./src/commands/db-sync-links.ts",
     "./commands/db-schemas": "./src/commands/db-schemas.ts",
+    "./commands/db-doctor": "./src/commands/db-doctor.ts",
     "./commands/exec": "./src/commands/exec.ts",
     "./commands/new": "./src/commands/new.ts",
     "./commands/dev": "./src/commands/dev.ts",
@@ -102,6 +103,11 @@
         "types": "./dist/commands/db-schemas.d.ts",
         "import": "./dist/commands/db-schemas.js",
         "default": "./dist/commands/db-schemas.js"
+      },
+      "./commands/db-doctor": {
+        "types": "./dist/commands/db-doctor.d.ts",
+        "import": "./dist/commands/db-doctor.js",
+        "default": "./dist/commands/db-doctor.js"
       },
       "./commands/exec": {
         "types": "./dist/commands/exec.d.ts",

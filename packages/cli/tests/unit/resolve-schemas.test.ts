@@ -123,4 +123,64 @@ describe("resolveSchemas", () => {
     )
     expect(result).toEqual(["@voyantjs/db/schema", "@voyantjs/crm/schema"])
   })
+
+  it("finds workspace packages from nested template directories", () => {
+    seedModule(tmp, "@voyantjs/db", { schema: "./schema", requiresSchemas: [] })
+    seedModule(tmp, "@voyantjs/accommodations", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+
+    const nested = join(tmp, "apps", "dev")
+    mkdirSync(nested, { recursive: true })
+    writeFileSync(join(nested, "package.json"), JSON.stringify({ name: "dev" }, null, 2))
+
+    const result = resolveSchemas({ modules: ["@voyantjs/accommodations"] }, { cwd: nested })
+
+    expect(result).toEqual(["@voyantjs/db/schema", "@voyantjs/accommodations/schema"])
+  })
+
+  it("includes schemas for extension subpath entries", () => {
+    seedModule(tmp, "@voyantjs/db", { schema: "./schema", requiresSchemas: [] })
+    seedModule(tmp, "@voyantjs/bookings", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+    seedModule(tmp, "@voyantjs/products", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+
+    const result = resolveSchemas(
+      {
+        modules: ["@voyantjs/bookings"],
+        extensions: ["@voyantjs/products/booking-extension"],
+      } as Parameters<typeof resolveSchemas>[0],
+      { cwd: tmp },
+    )
+
+    expect(result).toEqual([
+      "@voyantjs/db/schema",
+      "@voyantjs/bookings/schema",
+      "@voyantjs/products/schema",
+    ])
+  })
+
+  it("dedupes extension schemas when the owning package is already a module", () => {
+    seedModule(tmp, "@voyantjs/db", { schema: "./schema", requiresSchemas: [] })
+    seedModule(tmp, "@voyantjs/products", {
+      schema: "./schema",
+      requiresSchemas: ["@voyantjs/db"],
+    })
+
+    const result = resolveSchemas(
+      {
+        modules: ["@voyantjs/products"],
+        extensions: ["@voyantjs/products/booking-extension"],
+      } as Parameters<typeof resolveSchemas>[0],
+      { cwd: tmp },
+    )
+
+    expect(result).toEqual(["@voyantjs/db/schema", "@voyantjs/products/schema"])
+  })
 })

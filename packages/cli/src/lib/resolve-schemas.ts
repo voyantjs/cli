@@ -27,6 +27,17 @@ interface VoyantPackageManifest {
   requiresSchemas?: string[]
 }
 
+type ManifestEntry =
+  | string
+  | {
+      resolve: string
+      options?: Record<string, unknown>
+    }
+
+type VoyantConfigWithExtensions = VoyantConfig & {
+  extensions?: ManifestEntry[]
+}
+
 /**
  * Resolve the closure of schema entrypoints required by the modules listed in a
  * {@link VoyantConfig}. Walks each module's `package.json#voyant.requiresSchemas`
@@ -53,7 +64,12 @@ export function resolveSchemas(
 ): string[] {
   const cwd = options.cwd ?? process.cwd()
   const style = options.style ?? "specifier"
-  const seeds = (config.modules ?? []).map((entry) => resolveEntry(entry).resolve)
+  const seeds = [
+    ...(config.modules ?? []).map((entry) => resolveEntry(entry).resolve),
+    ...((config as VoyantConfigWithExtensions).extensions ?? []).map((entry) =>
+      owningPackageName(resolveManifestEntry(entry)),
+    ),
+  ]
   const order = expandClosure(seeds, cwd)
   return order.map((mod) => {
     const manifest = readManifest(mod, cwd)
@@ -63,6 +79,21 @@ export function resolveSchemas(
     }
     return resolveFilePath(mod, sub, cwd)
   })
+}
+
+function resolveManifestEntry(entry: ManifestEntry): string {
+  if (typeof entry === "string") return entry
+  return entry.resolve
+}
+
+function owningPackageName(specifier: string): string {
+  if (specifier.startsWith(".") || specifier.startsWith("/")) return specifier
+
+  const parts = specifier.split("/")
+  if (specifier.startsWith("@")) {
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : specifier
+  }
+  return parts[0] ?? specifier
 }
 
 /**
@@ -144,10 +175,16 @@ function resolvePackageJson(mod: string, cwd: string): string | null {
     // ignore — try workspace fallback
   }
 
-  // 3. Workspace fallback: monorepo-relative location.
+  // 3. Workspace fallback: walk ancestors looking for packages/<basename>.
+  // This keeps template/app configs working even when a schema-only package
+  // is referenced by drizzle.config but is not a direct package dependency.
   const base = mod.startsWith("@voyantjs/") ? mod.slice("@voyantjs/".length) : mod
-  const ws = join(cwd, "packages", base, "package.json")
-  if (existsSync(ws)) return ws
+  let dir = cwd
+  while (dir !== dirname(dir)) {
+    const ws = join(dir, "packages", base, "package.json")
+    if (existsSync(ws)) return ws
+    dir = dirname(dir)
+  }
 
   return null
 }

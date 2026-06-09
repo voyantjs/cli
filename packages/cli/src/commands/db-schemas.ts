@@ -1,12 +1,14 @@
-import { existsSync } from "node:fs"
-import { isAbsolute, join, resolve as resolvePath } from "node:path"
-import { pathToFileURL } from "node:url"
-
-import type { VoyantConfig } from "@voyantjs/core/config"
-
 import { parseArgs } from "../lib/args.js"
-import { resolveSchemas, type SchemaResolutionStyle } from "../lib/resolve-schemas.js"
+import {
+  defaultLinkSchemaEntry,
+  materializedLinks,
+  writeLinkSchemaManifest,
+} from "../lib/link-schema-manifest.js"
+import { loadVoyantConfig } from "../lib/load-voyant-config.js"
+import type { SchemaResolutionStyle } from "../lib/resolve-schemas.js"
+import { resolveSchemaManifest, writeSchemaManifest } from "../lib/schema-manifest.js"
 import type { CommandContext, CommandResult } from "../types.js"
+import { loadLinks, resolveLinksPath } from "./db-sync-links.js"
 
 /**
  * `voyant db schemas` — print the schema entrypoints derived from
@@ -14,7 +16,7 @@ import type { CommandContext, CommandResult } from "../types.js"
  *
  * Useful for debugging the dependency closure used by drizzle-kit. Defaults
  * to "specifier" output; pass `--style=file` to resolve each entry to an
- * absolute file path.
+ * absolute file path. Pass `--emit` to write `drizzle.schemas.generated.ts`.
  */
 export async function dbSchemasCommand(ctx: CommandContext): Promise<CommandResult> {
   const { flags } = parseArgs(ctx.argv)
@@ -37,31 +39,44 @@ export async function dbSchemasCommand(ctx: CommandContext): Promise<CommandResu
     return 1
   }
 
-  const schemas = resolveSchemas(config, { cwd: ctx.cwd, style })
+  let additionalSchemas: string[] = []
+  const linksPath = resolveLinksPath(ctx.cwd, flags)
+  if (linksPath) {
+    let links: Awaited<ReturnType<typeof loadLinks>>
+    try {
+      links = await loadLinks(linksPath)
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      ctx.stderr(`Failed to load links from ${linksPath}: ${reason}\n`)
+      return 1
+    }
+
+    if (materializedLinks(links).length > 0) {
+      additionalSchemas = [defaultLinkSchemaEntry()]
+      if (flags.emit === true) {
+        const generatedLinks = writeLinkSchemaManifest(links, {
+          cwd: ctx.cwd,
+          sourcePath: linksPath,
+        })
+        ctx.stdout(
+          `Wrote ${generatedLinks.links.length} link table schema(s) to ${generatedLinks.path}\n`,
+        )
+      }
+    }
+  }
+
+  const schemas = resolveSchemaManifest(config, { cwd: ctx.cwd, style, additionalSchemas })
+  if (flags.emit === true) {
+    const out = typeof flags.out === "string" ? flags.out : undefined
+    const generated = writeSchemaManifest(config, {
+      cwd: ctx.cwd,
+      outPath: out,
+      additionalSchemas,
+    })
+    ctx.stdout(`Wrote ${generated.entries.length} schema entrypoint(s) to ${generated.path}\n`)
+  }
   for (const entry of schemas) {
     ctx.stdout(`${entry}\n`)
   }
   return 0
-}
-
-/**
- * Locate and dynamically import a `voyant.config.{ts,js,mjs}` from `cwd` or
- * the explicit `override` path. Returns `null` when no config is found so the
- * caller can surface a usage error.
- */
-async function loadVoyantConfig(
-  cwd: string,
-  override: string | null,
-): Promise<VoyantConfig | null> {
-  const candidates = override
-    ? [isAbsolute(override) ? override : resolvePath(cwd, override)]
-    : ["voyant.config.ts", "voyant.config.js", "voyant.config.mjs"].map((name) => join(cwd, name))
-
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue
-    const mod = await import(pathToFileURL(candidate).href)
-    const config = (mod.default ?? mod) as VoyantConfig
-    return config
-  }
-  return null
 }

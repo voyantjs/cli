@@ -85,7 +85,10 @@ export async function dbSyncLinksCommand(ctx: CommandContext): Promise<CommandRe
   return 0
 }
 
-function resolveLinksPath(cwd: string, flags: Record<string, string | boolean>): string | null {
+export function resolveLinksPath(
+  cwd: string,
+  flags: Record<string, string | boolean>,
+): string | null {
   // --links <path> takes priority.
   if (typeof flags.links === "string") {
     const abs = isAbsolute(flags.links) ? flags.links : resolve(cwd, flags.links)
@@ -108,7 +111,7 @@ function resolveLinksPath(cwd: string, flags: Record<string, string | boolean>):
   return null
 }
 
-async function loadLinks(absPath: string): Promise<LinkDefinition[]> {
+export async function loadLinks(absPath: string): Promise<LinkDefinition[]> {
   const isTypeScript = /\.(m|c)?ts$/i.test(absPath)
   const raw = isTypeScript
     ? await loadLinksViaSubprocess(absPath)

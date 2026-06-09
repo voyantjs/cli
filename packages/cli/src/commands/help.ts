@@ -11,7 +11,11 @@ OPEN-SOURCE COMMANDS
   generate link <a> <b>              Emit a defineLink snippet (a, b as <module>.<entity>)
   config <show|validate|path>        Inspect the nearest voyant.config.* manifest
   dev --file <path>                  Watch and serve workflows locally with hot reload
-  db <generate|migrate|studio|push>  Proxy drizzle-kit commands to the nearest template
+  db <generate|migrate|studio|push|check>
+                                      Proxy drizzle-kit commands to the nearest template
+                                      (generate defaults to --prefix timestamp)
+  db schemas [--emit]                Print or write schema entries from voyant.config
+  db doctor [--fail-on-drift]        Report manifest, migration, and link drift
   db sync-links                      Emit SQL DDL for cross-module link tables
   exec <script.ts> [args...]         Run a TS/JS script with the voyant loader hook
   workflows <subcommand>             Build, serve, inspect, and self-host workflows
@@ -35,6 +39,8 @@ EXAMPLES
   voyant generate link crm.person products.product --right-list
   voyant config show
   voyant db generate
+  voyant db schemas --emit
+  voyant db doctor
   voyant exec ./scripts/backfill.ts --dry-run
   voyant login                                # browser device flow
   voyant login --token tok_live_abc123        # paste-token mode (CI/headless)
