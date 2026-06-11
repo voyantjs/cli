@@ -23,7 +23,7 @@ import { dbSyncLinksCommand } from "./db-sync-links.js"
  *   `links` array (see {@link dbSyncLinksCommand}).
  *
  * Resolution order for drizzle-kit proxies (first hit wins): `--template
- * <path>`, `templates/dmc`, or the current working directory.
+ * <path>`, or the current working directory.
  */
 export async function dbCommand(ctx: CommandContext): Promise<CommandResult> {
   const { positionals, flags } = parseArgs(ctx.argv)

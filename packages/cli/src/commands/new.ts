@@ -38,11 +38,11 @@ const SKIP_PATHS = new Set([
   ".DS_Store",
 ])
 
-const BUILT_IN_TEMPLATES = new Set(["dmc", "operator"])
+const BUILT_IN_TEMPLATES = new Set(["operator"])
 const STARTER_RELEASE_BASE_URL =
   process.env.VOYANT_STARTER_BASE_URL ?? "https://github.com/voyantjs/voyant/releases/download"
 
-const TEMPLATE_ALIAS_FALLBACK = "dmc"
+const TEMPLATE_ALIAS_FALLBACK = "operator"
 
 /**
  * `voyant new <name> [--template <name|path>] [--force]`
@@ -57,7 +57,7 @@ const TEMPLATE_ALIAS_FALLBACK = "dmc"
  *   2. `--template <name>` — built-in / discoverable template alias
  *   3. repo-local `templates/<name>` when invoked from a Voyant checkout
  *   4. version-matched starter tarball from GitHub Releases
- *   5. `dmc` as the default fallback starter
+ *   5. `operator` as the default fallback starter
  */
 export async function newCommand(ctx: CommandContext): Promise<CommandResult> {
   const { positionals, flags } = parseArgs(ctx.argv)
