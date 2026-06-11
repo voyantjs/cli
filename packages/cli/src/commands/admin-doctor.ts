@@ -8,12 +8,16 @@ import {
   DEFAULT_GENERATED_RELATIVE_PATH,
   scanAdminEntries,
 } from "../lib/admin-entries.js"
+import { scanDeclaredDestinationKeys, scanResolverMapKeys } from "../lib/admin-routes.js"
 import { getStringFlag, parseArgs } from "../lib/args.js"
 import { loadVoyantConfigFile, resolveConfigPath } from "../lib/config-loader.js"
 import type { CommandContext, CommandResult } from "../types.js"
 
+/** Default location (relative to the config dir) of the host's destination resolver map. */
+export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts"
+
 /**
- * `voyant admin doctor [--config <path>] [--out <file>]`
+ * `voyant admin doctor [--config <path>] [--out <file>] [--destinations <file>]`
  *
  * Report-only parity check for the manifest ↔ admin extension ↔ route chain
  * (packaged-admin RFC §4.1). Always exits 0 in this pass; CI can grep the
@@ -26,6 +30,13 @@ import type { CommandContext, CommandResult } from "../types.js"
  * - **C** — best-effort route parity: `path: "..."` literals declared in an
  *   admin entry's source have no plausible route file under
  *   `src/routes/_workspace/**`. Static scan only — nothing is imported.
+ * - **D** — destination parity (RFC §4.7): `AdminDestinations` keys the
+ *   mounted admin entries declare via `declare module "@voyantjs/admin"`
+ *   versus the keys of the host's resolver map (the object literal marked
+ *   `satisfies AdminDestinationResolvers`, default
+ *   `src/lib/admin-destinations.ts`, override with `--destinations`).
+ *   Reported in both directions: declared-but-unresolved and
+ *   resolver-without-declaration.
  */
 export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandResult> {
   const args = parseArgs(ctx.argv)
@@ -109,6 +120,60 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
       for (const routePath of declaredRoutePaths(entry)) {
         if (!routeFileExists(workspaceRoutesDir, routePath)) {
           report(`C: no route file found for ${routePath} (extension ${entry.importSpec})`)
+        }
+      }
+    }
+  }
+
+  // Finding D: destination parity — AdminDestinations declarations in the
+  // mounted admin entries vs the host's resolver map (RFC §4.7).
+  const destinationsFlag = getStringFlag(args, "destinations")
+  const destinationsPath = destinationsFlag
+    ? isAbsolute(destinationsFlag)
+      ? destinationsFlag
+      : resolve(ctx.cwd, destinationsFlag)
+    : join(configDir, DEFAULT_DESTINATIONS_RELATIVE_PATH)
+  const printableDestinations = relative(ctx.cwd, destinationsPath) || destinationsPath
+
+  if (!existsSync(destinationsPath)) {
+    ctx.stdout(
+      `[admin-doctor] D: skipped destination parity — no ${printableDestinations} in host\n`,
+    )
+  } else {
+    const resolverKeys = scanResolverMapKeys(readFileSync(destinationsPath, "utf8"))
+    if (resolverKeys === null) {
+      ctx.stdout(
+        `[admin-doctor] D: skipped destination parity — no \`satisfies AdminDestinationResolvers\` map in ${printableDestinations}\n`,
+      )
+    } else {
+      const resolverKeySet = new Set(resolverKeys)
+      const declaredBy = new Map<string, string[]>()
+      for (const entry of found) {
+        if (!entry.sourcePath || !entry.importSpec) continue
+        let source: string
+        try {
+          source = readFileSync(entry.sourcePath, "utf8")
+        } catch {
+          continue
+        }
+        for (const key of scanDeclaredDestinationKeys(source)) {
+          const declarers = declaredBy.get(key) ?? []
+          declarers.push(entry.importSpec)
+          declaredBy.set(key, declarers)
+        }
+      }
+      for (const [key, declarers] of declaredBy) {
+        if (!resolverKeySet.has(key)) {
+          report(
+            `D: destination "${key}" declared by ${declarers.join(", ")} has no resolver in ${printableDestinations}`,
+          )
+        }
+      }
+      for (const key of resolverKeys) {
+        if (!declaredBy.has(key)) {
+          report(
+            `D: resolver for "${key}" in ${printableDestinations} matches no declared destination`,
+          )
         }
       }
     }

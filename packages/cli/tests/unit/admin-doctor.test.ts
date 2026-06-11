@@ -180,6 +180,106 @@ describe("adminDoctorCommand", () => {
     expect(out).not.toContain(" A: ")
     expect(out).not.toContain(" B: ")
     expect(out).toContain("C: skipped route parity — no src/routes directory")
+    expect(out).toContain("D: skipped destination parity — no src/lib/admin-destinations.ts")
     expect(out).toContain("0 finding(s)")
+  })
+
+  describe("Finding D (destination parity)", () => {
+    const DESTINATION_FOO_SOURCE = `
+declare module "@voyantjs/admin" {
+  interface AdminDestinations {
+    "foo.list": Record<string, never>
+    "foo.detail": { fooId: string }
+  }
+}
+export function createFooAdminExtension(options = {}) {
+  const { path = "/foo" } = options
+  return { id: "foo", routes: [{ id: "foo-index", path }] }
+}
+`
+
+    function writeDestinationsFixture(root: string, resolverKeys: ReadonlyArray<string>) {
+      writeFileSync(
+        join(root, "voyant.config.ts"),
+        `export default { modules: ["@voyantjs/foo"] }\n`,
+      )
+      writePackage(root, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
+      writePackage(
+        root,
+        "@voyantjs/foo-ui",
+        { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
+        { "src/admin/index.tsx": DESTINATION_FOO_SOURCE },
+      )
+      mkdirSync(join(root, "src", "lib"), { recursive: true })
+      writeFileSync(
+        join(root, "src", "lib", "admin-destinations.ts"),
+        [
+          `import type { AdminDestinationResolvers } from "@voyantjs/admin"`,
+          ``,
+          `export const destinations = {`,
+          ...resolverKeys.map((key) => `  "${key}": () => "/${key.split(".")[0]}",`),
+          `} satisfies AdminDestinationResolvers`,
+          ``,
+        ].join("\n"),
+      )
+    }
+
+    it("reports declared destinations that have no resolver", async () => {
+      writeDestinationsFixture(tmp, ["foo.list"])
+      const { ctx, stdout } = makeCtx([], tmp)
+      expect(await adminDoctorCommand(ctx)).toBe(0)
+      const out = stdout.join("")
+      expect(out).toContain(
+        `D: destination "foo.detail" declared by @voyantjs/foo-ui/admin has no resolver`,
+      )
+      expect(out).not.toContain(`D: destination "foo.list"`)
+    })
+
+    it("reports resolvers that match no declared destination", async () => {
+      writeDestinationsFixture(tmp, ["foo.list", "foo.detail", "gone.detail"])
+      const { ctx, stdout } = makeCtx([], tmp)
+      expect(await adminDoctorCommand(ctx)).toBe(0)
+      const out = stdout.join("")
+      expect(out).toContain(`D: resolver for "gone.detail"`)
+      expect(out).toContain("matches no declared destination")
+      expect(out).not.toContain(`D: destination "foo.detail"`)
+      expect(out).not.toContain(`D: resolver for "foo.list"`)
+    })
+
+    it("is clean when declarations and resolvers match", async () => {
+      writeDestinationsFixture(tmp, ["foo.list", "foo.detail"])
+      // Compose first so Findings A/B are quiet and only D-parity is measured.
+      await adminGenerateCommand(makeCtx([], tmp).ctx)
+      const { ctx, stdout } = makeCtx([], tmp)
+      expect(await adminDoctorCommand(ctx)).toBe(0)
+      const out = stdout.join("")
+      expect(out).not.toContain(" D: ")
+      expect(out).toContain("0 finding(s)")
+    })
+
+    it("skips when the resolver file has no satisfies-marked map", async () => {
+      writeDestinationsFixture(tmp, [])
+      writeFileSync(
+        join(tmp, "src", "lib", "admin-destinations.ts"),
+        `export const destinations = { "foo.list": () => "/foo" }\n`,
+      )
+      const { ctx, stdout } = makeCtx([], tmp)
+      expect(await adminDoctorCommand(ctx)).toBe(0)
+      expect(stdout.join("")).toContain(
+        "D: skipped destination parity — no `satisfies AdminDestinationResolvers` map",
+      )
+    })
+
+    it("honors --destinations for a non-default resolver path", async () => {
+      writeDestinationsFixture(tmp, ["foo.list", "foo.detail"])
+      const custom = join(tmp, "src", "nav.ts")
+      writeFileSync(
+        custom,
+        `export const map = { "foo.list": () => "/foo" } satisfies AdminDestinationResolvers\n`,
+      )
+      const { ctx, stdout } = makeCtx(["--destinations", custom], tmp)
+      expect(await adminDoctorCommand(ctx)).toBe(0)
+      expect(stdout.join("")).toContain(`D: destination "foo.detail" declared by`)
+    })
   })
 })
