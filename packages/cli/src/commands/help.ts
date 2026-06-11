@@ -34,7 +34,7 @@ CLOUD COMMANDS  (need a Voyant Cloud token)
   --version, -v                      Show CLI version
 
 EXAMPLES
-  voyant new my-app --template dmc
+  voyant new my-app --template operator
   voyant generate module invoices
   voyant generate link crm.person products.product --right-list
   voyant config show

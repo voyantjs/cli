@@ -32,7 +32,7 @@ function seedTemplate(root: string) {
     join(root, "package.json"),
     JSON.stringify(
       {
-        name: "template-dmc",
+        name: "template-operator",
         version: "1.2.3",
         dependencies: {
           "@voyantjs/core": "workspace:*",
@@ -112,8 +112,15 @@ describe("newCommand", () => {
     expect(stderr.join("")).toContain("Could not find a template")
   })
 
+  it("rejects the retired dmc template alias", async () => {
+    const { ctx, stderr } = makeCtx(["my-app", "--template", "dmc"], tmp)
+    const code = await newCommand(ctx)
+    expect(code).toBe(1)
+    expect(stderr.join("")).toContain("Could not find a template")
+  })
+
   it("fails when target already exists without --force", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     mkdirSync(join(tmp, "my-app"))
     const { ctx, stderr } = makeCtx(["my-app"], tmp)
     const code = await newCommand(ctx)
@@ -122,7 +129,7 @@ describe("newCommand", () => {
   })
 
   it("overwrites the target when --force is set", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     mkdirSync(join(tmp, "my-app"))
     writeFileSync(join(tmp, "my-app", "stale.txt"), "old\n")
     const { ctx, stdout } = makeCtx(["my-app", "--force"], tmp)
@@ -133,8 +140,8 @@ describe("newCommand", () => {
     expect(existsSync(join(tmp, "my-app", "src", "entry.ts"))).toBe(true)
   })
 
-  it("scaffolds a new project from templates/dmc", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+  it("scaffolds a new project from templates/operator", async () => {
+    seedTemplate(join(tmp, "templates", "operator"))
     const { ctx, stdout } = makeCtx(["my-app"], tmp)
     const code = await newCommand(ctx)
     expect(code).toBe(0)
@@ -146,7 +153,7 @@ describe("newCommand", () => {
   })
 
   it("rewrites package.json name + version + private", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     const { ctx } = makeCtx(["my-app"], tmp)
     await newCommand(ctx)
     const pkg = JSON.parse(readFileSync(join(tmp, "my-app", "package.json"), "utf8"))
@@ -162,7 +169,7 @@ describe("newCommand", () => {
   })
 
   it("skips node_modules, dist, .turbo, and secret env files when copying", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     const { ctx } = makeCtx(["my-app"], tmp)
     await newCommand(ctx)
     expect(existsSync(join(tmp, "my-app", "node_modules"))).toBe(false)
@@ -173,7 +180,7 @@ describe("newCommand", () => {
   })
 
   it("writes a default voyant.config.ts when the template lacks one", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     const { ctx } = makeCtx(["my-app"], tmp)
     await newCommand(ctx)
     const cfg = readFileSync(join(tmp, "my-app", "voyant.config.ts"), "utf8")
@@ -182,7 +189,7 @@ describe("newCommand", () => {
   })
 
   it("preserves an existing voyant.config.ts from the template", async () => {
-    const templateRoot = join(tmp, "templates", "dmc")
+    const templateRoot = join(tmp, "templates", "operator")
     seedTemplate(templateRoot)
     writeFileSync(join(templateRoot, "voyant.config.ts"), "// pre-existing config\n")
     const { ctx } = makeCtx(["my-app"], tmp)
@@ -201,15 +208,15 @@ describe("newCommand", () => {
   })
 
   it("honors --template with a starter alias", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
-    const { ctx } = makeCtx(["my-app", "--template", "dmc"], tmp)
+    seedTemplate(join(tmp, "templates", "operator"))
+    const { ctx } = makeCtx(["my-app", "--template", "operator"], tmp)
     const code = await newCommand(ctx)
     expect(code).toBe(0)
     expect(existsSync(join(tmp, "my-app", "src", "entry.ts"))).toBe(true)
   })
 
   it("rewrites monorepo drizzle config into a standalone schema entrypoint", async () => {
-    seedTemplate(join(tmp, "templates", "dmc"))
+    seedTemplate(join(tmp, "templates", "operator"))
     const { ctx } = makeCtx(["my-app"], tmp)
     await newCommand(ctx)
     const drizzle = readFileSync(join(tmp, "my-app", "drizzle.config.ts"), "utf8")
@@ -224,7 +231,7 @@ describe("newCommand", () => {
     const starterRoot = join(tmp, "remote-starter")
     seedTemplate(starterRoot)
 
-    const archivePath = join(tmp, `voyant-starter-dmc-${VOYANT_FRAMEWORK_VERSION}.tar.gz`)
+    const archivePath = join(tmp, `voyant-starter-operator-${VOYANT_FRAMEWORK_VERSION}.tar.gz`)
     await c(
       {
         cwd: starterRoot,
@@ -237,7 +244,7 @@ describe("newCommand", () => {
     const archive = readFileSync(archivePath)
     globalThis.fetch = async (input) => {
       expect(String(input)).toContain(
-        `/v${VOYANT_FRAMEWORK_VERSION}/voyant-starter-dmc-${VOYANT_FRAMEWORK_VERSION}.tar.gz`,
+        `/v${VOYANT_FRAMEWORK_VERSION}/voyant-starter-operator-${VOYANT_FRAMEWORK_VERSION}.tar.gz`,
       )
       return new Response(archive, {
         status: 200,
@@ -247,7 +254,7 @@ describe("newCommand", () => {
 
     const workspace = join(tmp, "workspace")
     mkdirSync(workspace, { recursive: true })
-    const { ctx } = makeCtx(["my-app", "--template", "dmc"], workspace)
+    const { ctx } = makeCtx(["my-app", "--template", "operator"], workspace)
     const code = await newCommand(ctx)
     expect(code).toBe(0)
     expect(existsSync(join(workspace, "my-app", "src", "entry.ts"))).toBe(true)
