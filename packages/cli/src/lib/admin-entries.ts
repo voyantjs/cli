@@ -17,8 +17,8 @@ export type AdminEntryStatus =
   | "found"
   /** The module package itself could not be resolved from the config dir. */
   | "module-unresolved"
-  /** No `<module>-ui` package could be resolved from the config dir. */
-  | "no-ui-package"
+  /** No `<module>-react` package could be resolved from the config dir. */
+  | "no-client-package"
   /** The ui package exists but its `exports` map has no admin subpath. */
   | "no-admin-export"
   /** The admin entry source is readable but lacks `create<Pascal>AdminExtension`. */
@@ -37,7 +37,7 @@ export interface AdminEntryScanResult {
   /** Conventional factory export name (e.g. `createPromotionsAdminExtension`). */
   exportName: string
   status: AdminEntryStatus
-  /** Import specifier for the admin entry (e.g. `@voyantjs/promotions-ui/admin`). */
+  /** Import specifier for the admin entry (e.g. `@voyantjs/promotions-react/admin`). */
   importSpec?: string
   /** Absolute path to the admin entry source, when resolvable on disk. */
   sourcePath?: string
@@ -47,12 +47,12 @@ export interface AdminEntryScanResult {
 
 /**
  * Scan a manifest's `modules` for admin entries following the
- * `<module>-ui/admin` convention (packaged-admin RFC §4.1).
+ * `<module>-react/admin` convention (packaged-admin RFC §4.1).
  *
  * Detection is pure package.json inspection — no code is executed:
  * 1. Resolve the module's own package.json; honor an explicit
  *    `voyant.adminEntry` override when present.
- * 2. Otherwise probe `<module>-ui` and require an `"./admin"` entry in its
+ * 2. Otherwise probe `<module>-react` and require an `"./admin"` entry in its
  *    `exports` map.
  * 3. Best-effort: read the entry source and verify it exports
  *    `create<Pascal>AdminExtension`; a readable file without that named
@@ -85,45 +85,45 @@ function scanOne(moduleName: string, configDir: string): AdminEntryScanResult {
       // Conventional candidate spec (a voyant.adminEntry override is
       // unreadable here) so the doctor can tell "module unresolvable" apart
       // from "module left the manifest" for existing generated imports.
-      importSpec: `${moduleName}-ui/admin`,
+      importSpec: `${moduleName}-react/admin`,
       status: "module-unresolved",
       note: `module package ${moduleName} not resolvable from ${configDir}`,
     }
   }
 
   const override = readAdminEntryOverride(modulePkgPath)
-  const { pkg: uiPkgName, subpath } = override
+  const { pkg: clientPkgName, subpath } = override
     ? splitSpecifier(override)
-    : { pkg: `${moduleName}-ui`, subpath: "./admin" }
-  const importSpec = override ?? `${uiPkgName}/admin`
+    : { pkg: `${moduleName}-react`, subpath: "./admin" }
+  const importSpec = override ?? `${clientPkgName}/admin`
 
-  const uiPkgPath = resolvePackageJson(uiPkgName, configDir)
-  if (!uiPkgPath) {
+  const clientPkgPath = resolvePackageJson(clientPkgName, configDir)
+  if (!clientPkgPath) {
     return {
       ...base,
       // Keep the candidate spec: the doctor compares generated imports
       // against manifest candidates, and a module whose UI package merely
       // went missing must not be misreported as removed from the manifest.
       importSpec,
-      status: "no-ui-package",
+      status: "no-client-package",
       note: override
-        ? `voyant.adminEntry package ${uiPkgName} not resolvable from ${configDir}`
-        : `no ${uiPkgName} package resolvable from ${configDir}`,
+        ? `voyant.adminEntry package ${clientPkgName} not resolvable from ${configDir}`
+        : `no ${clientPkgName} package resolvable from ${configDir}`,
     }
   }
 
-  const exportsMap = readExportsMap(uiPkgPath)
+  const exportsMap = readExportsMap(clientPkgPath)
   const target = exportsTarget(exportsMap, subpath)
   if (!target) {
     return {
       ...base,
       importSpec,
       status: "no-admin-export",
-      note: `${uiPkgName} has no "${subpath}" entry in its package.json exports`,
+      note: `${clientPkgName} has no "${subpath}" entry in its package.json exports`,
     }
   }
 
-  const sourcePath = join(dirname(uiPkgPath), target)
+  const sourcePath = join(dirname(clientPkgPath), target)
   const source = tryReadFile(sourcePath)
   if (source !== null && !new RegExp(`\\b${base.exportName}\\b`).test(source)) {
     return {
