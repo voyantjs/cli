@@ -10,6 +10,8 @@ OPEN-SOURCE COMMANDS
   generate module <name>             Scaffold a new module package under packages/<name>
   generate link <a> <b>              Emit a defineLink snippet (a, b as <module>.<entity>)
   config <show|validate|path>        Inspect the nearest voyant.config.* manifest
+  admin generate [--check]           Emit admin.extensions.generated.ts from the manifest
+  admin doctor                       Report manifest <-> admin extension <-> route drift
   dev --file <path>                  Watch and serve workflows locally with hot reload
   db <generate|migrate|studio|push>  Proxy drizzle-kit commands (generate defaults to --prefix timestamp)
   db schemas [--emit]                Print/emit the manifest-derived schema list
@@ -36,6 +38,8 @@ EXAMPLES
   voyant generate module invoices
   voyant generate link crm.person products.product --right-list
   voyant config show
+  voyant admin generate --check
+  voyant admin doctor
   voyant db generate
   voyant exec ./scripts/backfill.ts --dry-run
   voyant login                                # browser device flow
