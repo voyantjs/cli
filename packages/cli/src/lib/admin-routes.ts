@@ -7,7 +7,7 @@ import { join } from "node:path"
  * Everything here is pure source-text scanning — no admin entry is ever
  * imported or executed. The scanners are deliberately convention-bound: they
  * understand the `defineAdminExtension({ routes: [...] })` shape and the
- * `declare module "@voyantjs/admin"` destination declarations the `*-ui`
+ * `declare module "@voyantjs/admin"` destination declarations the `*-react`
  * packages actually write, resolving option-destructuring string defaults
  * (`const { path = "/promotions" } = options`) and template-literal paths
  * (`` `${basePath}/contracts` ``) against those defaults.
@@ -502,7 +502,7 @@ export function alternativeRouteFileRelPaths(routePath: string): string[] {
 export interface RenderRouteFileOptions {
   /** createFileRoute id, e.g. `/_workspace/promotions/`. */
   fileRouteId: string
-  /** Admin entry import specifier, e.g. `@voyantjs/promotions-ui/admin`. */
+  /** Admin entry import specifier, e.g. `@voyantjs/promotions-react/admin`. */
   importSpec: string
   /** Extension factory export, e.g. `createPromotionsAdminExtension`. */
   exportName: string

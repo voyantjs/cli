@@ -27,12 +27,12 @@ import type { CommandContext, CommandResult } from "../types.js"
  * `voyant admin generate [--config <path>] [--out <file>] [--check]`
  *
  * Manifest-driven admin composition (packaged-admin RFC §4.1): for every
- * module in voyant.config.*, derive its `<module>-ui/admin` entry (or the
+ * module in voyant.config.*, derive its `<module>-react/admin` entry (or the
  * module's `package.json#voyant.adminEntry` override), verify the entry via
  * package.json inspection only, and emit a committed file of static imports:
  *
  * ```ts
- * import { createPromotionsAdminExtension } from "@voyantjs/promotions-ui/admin"
+ * import { createPromotionsAdminExtension } from "@voyantjs/promotions-react/admin"
  * export const generatedAdminExtensionFactories = { ... } as const
  * ```
  *

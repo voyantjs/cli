@@ -177,7 +177,7 @@ describe("route file paths", () => {
 describe("renderRouteFile", () => {
   const baseOptions = {
     fileRouteId: "/_workspace/promotions/",
-    importSpec: "@voyantjs/promotions-ui/admin",
+    importSpec: "@voyantjs/promotions-react/admin",
     exportName: "createPromotionsAdminExtension",
     routeId: "promotions-index",
     ssr: "data-only" as const,
@@ -197,7 +197,7 @@ describe("renderRouteFile", () => {
     expect(isGeneratedRouteFile(content)).toBe(true)
     expect(content).toContain(GENERATED_ROUTE_HEADER)
     expect(content).toContain(
-      `import { createPromotionsAdminExtension } from "@voyantjs/promotions-ui/admin"`,
+      `import { createPromotionsAdminExtension } from "@voyantjs/promotions-react/admin"`,
     )
     expect(content).toContain(`import { requireAdminRoute } from "@voyantjs/admin"`)
     expect(content).toContain(
