@@ -125,10 +125,15 @@ describe("adminDoctorCommand", () => {
 
   it("does not report Finding B when only the module's UI package is missing", async () => {
     writeFixture(tmp)
+    // @voyantjs/bar stays in the manifest (module package present) but has
+    // no resolvable bar-ui package — a stale generated import for it is a
+    // regenerate-needed situation, NOT "module left the manifest".
+    writeFileSync(
+      join(tmp, "voyant.config.ts"),
+      `export default { modules: ["@voyantjs/foo", "@voyantjs/bar"] }\n`,
+    )
+    writePackage(tmp, "@voyantjs/bar", { exports: { ".": "./src/index.ts" } })
     mkdirSync(join(tmp, "src"), { recursive: true })
-    // @voyantjs/bar is still in the manifest but has no resolvable bar-ui
-    // package — a stale generated import for it is a regenerate-needed
-    // situation, NOT "module left the manifest".
     writeFileSync(
       join(tmp, "src", "admin.extensions.generated.ts"),
       [
