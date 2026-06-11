@@ -13,6 +13,8 @@
     "./commands/generate-module": "./src/commands/generate-module.ts",
     "./commands/generate-link": "./src/commands/generate-link.ts",
     "./commands/config": "./src/commands/config.ts",
+    "./commands/admin-generate": "./src/commands/admin-generate.ts",
+    "./commands/admin-doctor": "./src/commands/admin-doctor.ts",
     "./commands/db-sync-links": "./src/commands/db-sync-links.ts",
     "./commands/db-schemas": "./src/commands/db-schemas.ts",
     "./commands/exec": "./src/commands/exec.ts",
@@ -92,6 +94,16 @@
         "types": "./dist/commands/config.d.ts",
         "import": "./dist/commands/config.js",
         "default": "./dist/commands/config.js"
+      },
+      "./commands/admin-generate": {
+        "types": "./dist/commands/admin-generate.d.ts",
+        "import": "./dist/commands/admin-generate.js",
+        "default": "./dist/commands/admin-generate.js"
+      },
+      "./commands/admin-doctor": {
+        "types": "./dist/commands/admin-doctor.d.ts",
+        "import": "./dist/commands/admin-doctor.js",
+        "default": "./dist/commands/admin-doctor.js"
       },
       "./commands/db-sync-links": {
         "types": "./dist/commands/db-sync-links.d.ts",

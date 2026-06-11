@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import { adminCommand } from "./commands/admin.js"
 import { configCommand } from "./commands/config.js"
 import { dbCommand } from "./commands/db.js"
 import { devCommand } from "./commands/dev-command.js"
@@ -65,6 +66,9 @@ export async function main(
     }
     case "config": {
       return configCommand({ ...ctx, argv: rest })
+    }
+    case "admin": {
+      return adminCommand({ ...ctx, argv: rest })
     }
     case "new": {
       return newCommand({ ...ctx, argv: rest })
