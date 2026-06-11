@@ -82,6 +82,10 @@ function scanOne(moduleName: string, configDir: string): AdminEntryScanResult {
   if (!modulePkgPath) {
     return {
       ...base,
+      // Conventional candidate spec (a voyant.adminEntry override is
+      // unreadable here) so the doctor can tell "module unresolvable" apart
+      // from "module left the manifest" for existing generated imports.
+      importSpec: `${moduleName}-ui/admin`,
       status: "module-unresolved",
       note: `module package ${moduleName} not resolvable from ${configDir}`,
     }
@@ -97,6 +101,10 @@ function scanOne(moduleName: string, configDir: string): AdminEntryScanResult {
   if (!uiPkgPath) {
     return {
       ...base,
+      // Keep the candidate spec: the doctor compares generated imports
+      // against manifest candidates, and a module whose UI package merely
+      // went missing must not be misreported as removed from the manifest.
+      importSpec,
       status: "no-ui-package",
       note: override
         ? `voyant.adminEntry package ${uiPkgName} not resolvable from ${configDir}`

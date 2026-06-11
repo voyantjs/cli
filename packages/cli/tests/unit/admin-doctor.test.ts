@@ -123,6 +123,30 @@ describe("adminDoctorCommand", () => {
     expect(out).not.toContain("A: admin entry @voyantjs/foo-ui/admin")
   })
 
+  it("does not report Finding B when only the module's UI package is missing", async () => {
+    writeFixture(tmp)
+    mkdirSync(join(tmp, "src"), { recursive: true })
+    // @voyantjs/bar is still in the manifest but has no resolvable bar-ui
+    // package — a stale generated import for it is a regenerate-needed
+    // situation, NOT "module left the manifest".
+    writeFileSync(
+      join(tmp, "src", "admin.extensions.generated.ts"),
+      [
+        `import { createFooAdminExtension } from "@voyantjs/foo-ui/admin"`,
+        `import { createBarAdminExtension } from "@voyantjs/bar-ui/admin"`,
+        `export const generatedAdminExtensionFactories = {`,
+        `  foo: createFooAdminExtension,`,
+        `  bar: createBarAdminExtension,`,
+        `} as const`,
+        ``,
+      ].join("\n"),
+    )
+    const { ctx, stdout } = makeCtx([], tmp)
+    const code = await adminDoctorCommand(ctx)
+    expect(code).toBe(0)
+    expect(stdout.join("")).not.toContain("B: @voyantjs/bar-ui/admin")
+  })
+
   it("reports Finding C when no route file matches a declared path", async () => {
     writeFixture(tmp)
     await adminGenerateCommand(makeCtx([], tmp).ctx)
