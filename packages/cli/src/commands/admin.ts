@@ -8,11 +8,12 @@ import { adminGenerateCommand } from "./admin-generate.js"
  * (packaged-admin RFC §4.1).
  *
  * - `generate` — emit the committed `admin.extensions.generated.ts` from
- *   voyant.config.*; with `--routes`, emit generated thin route files for
- *   zero-prop extension route contributions (see {@link adminGenerateCommand}).
+ *   voyant.config.*; with `--routes`, emit the code-assembled admin route
+ *   module (packaged-admin RFC §4.8; `--routes --files` keeps the legacy
+ *   per-route thin files — see {@link adminGenerateCommand}).
  * - `doctor` — report-only parity check between manifest, generated
- *   composition, host route files, and the destination resolver map (see
- *   {@link adminDoctorCommand}).
+ *   composition, host routes (files or the code-assembled module), and the
+ *   destination resolver map (see {@link adminDoctorCommand}).
  */
 export async function adminCommand(ctx: CommandContext): Promise<CommandResult> {
   const { positionals } = parseArgs(ctx.argv)

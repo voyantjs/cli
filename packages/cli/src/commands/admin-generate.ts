@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { VoyantConfig } from "@voyantjs/core/config"
 
@@ -9,18 +9,28 @@ import {
   scanAdminEntries,
 } from "../lib/admin-entries.js"
 import {
-  type AdminRouteRuntimeImports,
+  type AdminRoutesManifestConfig,
+  type AdminRoutesModuleRoute,
+  type AdminRoutesModuleSection,
   alternativeRouteFileRelPaths,
   canonicalRouteFileRelPath,
-  DEFAULT_ROUTE_RUNTIME_IMPORTS,
+  DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH,
   DEFAULT_ROUTES_DIR,
   fileRouteIdFor,
   isGeneratedRouteFile,
+  isImplementedContribution,
+  renderAdminRoutesModule,
   renderRouteFile,
+  resolveAdminRoutesManifestConfig,
+  resolveSearchSchemaIdent,
+  routeIdPrefixFor,
+  scanExtensionId,
   scanRouteContributions,
+  workspaceRouteModuleFor,
 } from "../lib/admin-routes.js"
 import { getBooleanFlag, getStringFlag, parseArgs } from "../lib/args.js"
 import { loadVoyantConfigFile, resolveConfigPath } from "../lib/config-loader.js"
+import { toPascalCase } from "../lib/strings.js"
 import type { CommandContext, CommandResult } from "../types.js"
 
 /**
@@ -38,17 +48,29 @@ import type { CommandContext, CommandResult } from "../types.js"
  *
  * Factories — not instances — so hosts can pass localized labels/icons.
  *
- * `voyant admin generate --routes [--routes-dir <dir>] [--check]`
+ * `voyant admin generate --routes [--routes-dir <dir>] [--out <file>] [--check]`
  *
- * Generated thin route files (packaged-admin RFC §4.2, first increment of
- * code-based route assembly): statically scan each admin entry's route
- * contributions and emit one thin host file per ZERO-PROP route (component
- * present, no `$param` segments) into the host's file-based route tree.
- * Param-taking detail hosts stay hand-written. A file without the generated
- * header is never overwritten — deleting the header is how a host ejects a
- * route. Runtime-import bindings default to the operator conventions
- * (`@/lib/env` / `@/lib/voyant-fetcher`) and are configurable via the
- * manifest's `admin.routes` block.
+ * Code-assembled admin route module (packaged-admin RFC §4.8 endgame):
+ * statically scan each admin entry's route contributions and emit ONE
+ * committed module (default `src/admin.routes.generated.tsx`) holding a
+ * code-based `createRoute` per implemented contribution (`page` or
+ * `component` present — `$param` routes included), its options resolved from
+ * the host-registered extension instances via `adminExtensionRouteOptions`,
+ * plus the typed-link map interfaces the host's `router.tsx` merges. NO
+ * per-route files exist for package-delivered pages. A target file without
+ * the generated header is never overwritten — deleting the header is how a
+ * host ejects the module; a hand-written route file binding a contribution's
+ * path ejects that single route. Import bindings default to the operator
+ * conventions (`@/lib/env`, `@/lib/voyant-fetcher`,
+ * `@/lib/admin-extensions`) and are configurable via the manifest's
+ * `admin.routes` block.
+ *
+ * `voyant admin generate --routes --files [--routes-dir <dir>] [--check]`
+ *
+ * Legacy per-route thin files (RFC §4.2 increment 1) for hosts not yet
+ * migrated to the code-assembled module: one generated host file per
+ * ZERO-PROP `component` route (no `$param` segments) under the host's
+ * file-based route tree.
  *
  * `--check` writes nothing and exits 1 when committed output is missing or
  * differs from what would be generated (CI drift gate).
@@ -84,14 +106,17 @@ export async function adminGenerateCommand(ctx: CommandContext): Promise<Command
   const results = scanAdminEntries(modules, configDir)
 
   if (routesMode) {
-    return generateRouteFiles({
+    const routesOptions = {
       ctx,
-      config,
       configDir,
       results,
       check,
+      routesConfig: resolveAdminRoutesManifestConfig(config),
       routesDirFlag: getStringFlag(args, "routes-dir"),
-    })
+    }
+    return getBooleanFlag(args, "files")
+      ? generateRouteFiles(routesOptions)
+      : generateRoutesModule({ ...routesOptions, outFlag })
   }
 
   for (const result of results) {
@@ -176,60 +201,241 @@ export function renderGeneratedFile(found: ReadonlyArray<AdminEntryScanResult>):
   return [...header, ...(imports.length > 0 ? [...imports, ""] : []), ...body].join("\n")
 }
 
-/** Manifest `admin.routes` block, read structurally (older core types lack it). */
-function readAdminRoutesConfig(config: VoyantConfig): {
-  dir?: string
-  runtime: AdminRouteRuntimeImports
-} {
-  const routes = (
-    config as {
-      admin?: {
-        routes?: {
-          dir?: string
-          apiUrlModule?: string
-          apiUrlExport?: string
-          fetcherModule?: string
-          fetcherExport?: string
-        }
-      }
-    }
-  ).admin?.routes
-  return {
-    dir: typeof routes?.dir === "string" ? routes.dir : undefined,
-    runtime: {
-      apiUrlModule: routes?.apiUrlModule ?? DEFAULT_ROUTE_RUNTIME_IMPORTS.apiUrlModule,
-      apiUrlExport: routes?.apiUrlExport ?? DEFAULT_ROUTE_RUNTIME_IMPORTS.apiUrlExport,
-      fetcherModule: routes?.fetcherModule ?? DEFAULT_ROUTE_RUNTIME_IMPORTS.fetcherModule,
-      fetcherExport: routes?.fetcherExport ?? DEFAULT_ROUTE_RUNTIME_IMPORTS.fetcherExport,
-    },
-  }
-}
-
 interface GenerateRouteFilesOptions {
   ctx: CommandContext
-  config: VoyantConfig
   configDir: string
   results: ReadonlyArray<AdminEntryScanResult>
   check: boolean
+  routesConfig: AdminRoutesManifestConfig
   routesDirFlag: string | undefined
 }
 
+type FoundAdminEntry = AdminEntryScanResult & { importSpec: string; sourcePath: string }
+
+function foundEntries(results: ReadonlyArray<AdminEntryScanResult>): FoundAdminEntry[] {
+  return results.filter(
+    (result): result is FoundAdminEntry =>
+      result.status === "found" &&
+      result.importSpec !== undefined &&
+      result.sourcePath !== undefined,
+  )
+}
+
+interface GenerateRoutesModuleOptions extends GenerateRouteFilesOptions {
+  outFlag: string | undefined
+}
+
 /**
- * `voyant admin generate --routes` — emit generated thin route files for
- * every zero-prop route contribution of every resolved admin entry.
+ * `voyant admin generate --routes` — emit the code-assembled admin route
+ * module (packaged-admin RFC §4.8).
+ *
+ * Per contribution:
+ * - no statically resolvable id/path → note, skipped (the generator only
+ *   trusts what it can read without executing the entry)
+ * - no implementation (`page`/`component`) → skipped, metadata-only — those
+ *   stay bound by hand-written host route files
+ * - a route file under the routes dir WITHOUT the generated header → that
+ *   single route is ejected: omitted from the module and reported
+ * - a leftover GENERATED thin route file (RFC §4.2 increment 1) → superseded
+ *   by the module: deleted on write, reported as drift with `--check`
+ * - `validateSearch` whose schema identifier cannot be statically resolved
+ *   to an export of the entry → emitted without the typed search contract,
+ *   noted (the runtime contract still applies via the contribution)
+ *
+ * A target module without the generated header is the host's own (ejected
+ * wholesale) and is never overwritten.
+ */
+function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResult {
+  const { ctx, configDir, results, check, routesConfig } = options
+  const routesDirRel = options.routesDirFlag ?? routesConfig.dir ?? DEFAULT_ROUTES_DIR
+  const routesDir = isAbsolute(routesDirRel) ? routesDirRel : join(configDir, routesDirRel)
+  const outRel =
+    options.outFlag ?? routesConfig.out ?? DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH
+  const outPath = isAbsolute(outRel)
+    ? outRel
+    : options.outFlag
+      ? resolve(ctx.cwd, outRel)
+      : join(configDir, outRel)
+  const printableOut = relative(ctx.cwd, outPath) || outPath
+
+  let ejected = 0
+  let metadataOnly = 0
+  const supersededFiles: string[] = []
+  const sections: AdminRoutesModuleSection[] = []
+  const found = foundEntries(results)
+
+  for (const entry of found) {
+    let source: string
+    try {
+      source = readFileSync(entry.sourcePath, "utf8")
+    } catch {
+      ctx.stderr(`[admin-generate] routes: note — ${entry.importSpec} source not readable\n`)
+      continue
+    }
+
+    const routes: AdminRoutesModuleRoute[] = []
+    for (const contribution of scanRouteContributions(source)) {
+      if (contribution.id === null || contribution.path === null) {
+        ctx.stderr(
+          `[admin-generate] routes: note — skipped a ${entry.importSpec} contribution ` +
+            `(id/path not statically resolvable${
+              contribution.rawPath === null ? "" : `: path ${contribution.rawPath}`
+            })\n`,
+        )
+        continue
+      }
+      if (!isImplementedContribution(contribution)) {
+        metadataOnly++
+        continue
+      }
+
+      // Route-level ejection: a route file for this path that is NOT
+      // generator-owned means the host hand-binds it — leave it out.
+      const existingFiles = [
+        canonicalRouteFileRelPath(contribution.path),
+        ...alternativeRouteFileRelPaths(contribution.path),
+      ]
+        .map((rel) => join(routesDir, rel))
+        .filter((candidate) => existsSync(candidate))
+      const handWritten = existingFiles.find(
+        (file) => !isGeneratedRouteFile(readFileSync(file, "utf8")),
+      )
+      if (handWritten !== undefined) {
+        ejected++
+        const printableFile = relative(ctx.cwd, handWritten) || handWritten
+        ctx.stderr(
+          `[admin-generate] routes: skipped ${contribution.path} — hand-written host ` +
+            `${printableFile} binds this route (ejected)\n`,
+        )
+        continue
+      }
+      // Leftover generated thin files (increment 1) are superseded by the module.
+      supersededFiles.push(...existingFiles)
+
+      let searchSchemaIdent: string | null = null
+      if (contribution.hasValidateSearch) {
+        searchSchemaIdent =
+          contribution.validateSearchRaw === null
+            ? null
+            : resolveSearchSchemaIdent(contribution.validateSearchRaw, source)
+        if (searchSchemaIdent === null) {
+          ctx.stderr(
+            `[admin-generate] routes: note — ${contribution.id} has a validateSearch whose ` +
+              `schema is not an export of ${entry.importSpec}; emitted without a typed ` +
+              `search contract\n`,
+          )
+        }
+      }
+
+      routes.push({
+        constName: `${toPascalCase(contribution.id)}Route`,
+        routeId: contribution.id,
+        path: contribution.path,
+        searchSchemaIdent,
+      })
+    }
+
+    if (routes.length > 0) {
+      sections.push({
+        extensionId: scanExtensionId(source) ?? entry.domain,
+        importSpec: entry.importSpec,
+        routes,
+      })
+    }
+  }
+
+  sections.sort((a, b) =>
+    a.extensionId < b.extensionId ? -1 : a.extensionId > b.extensionId ? 1 : 0,
+  )
+  const routeCount = sections.reduce((sum, section) => sum + section.routes.length, 0)
+
+  if (routeCount === 0) {
+    ctx.stdout(
+      `[admin-generate] routes: no implemented extension route contributions across ` +
+        `${found.length} admin entries — nothing to emit\n`,
+    )
+    return 0
+  }
+
+  const content = renderAdminRoutesModule({
+    moduleBaseName: basename(outPath).replace(/\.[^.]+$/, ""),
+    sections,
+    imports: routesConfig.imports,
+    workspaceRouteModule:
+      routesConfig.workspaceRouteModule ?? workspaceRouteModuleFor(routesDirRel),
+    routeIdPrefix: routeIdPrefixFor(routesDirRel),
+  })
+
+  const existing = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
+  if (existing !== null && !isGeneratedRouteFile(existing)) {
+    ctx.stderr(
+      `[admin-generate] routes: skipped ${printableOut} — it has no generated header ` +
+        `(ejected, host-owned)\n`,
+    )
+    return 0
+  }
+
+  const summary = (state: string): string =>
+    `[admin-generate] routes: ${routeCount} extension route(s) across ${sections.length} ` +
+    `extension(s) — ${printableOut} ${state}, ${ejected} ejected, ${metadataOnly} ` +
+    `metadata-only contribution(s) left to hand-written hosts\n`
+
+  if (check) {
+    let drift = 0
+    if (existing !== content) {
+      drift++
+      ctx.stderr(
+        existing === null
+          ? `[admin-generate] routes: ${printableOut} is missing — run \`voyant admin generate --routes\`\n`
+          : `[admin-generate] routes: ${printableOut} is out of date — run \`voyant admin generate --routes\`\n`,
+      )
+    }
+    for (const file of supersededFiles) {
+      drift++
+      const printableFile = relative(ctx.cwd, file) || file
+      ctx.stderr(
+        `[admin-generate] routes: ${printableFile} is a generated thin route file superseded ` +
+          `by ${printableOut} — run \`voyant admin generate --routes\`\n`,
+      )
+    }
+    ctx.stdout(summary(drift > 0 ? "drifted" : "is up to date"))
+    return drift > 0 ? 1 : 0
+  }
+
+  for (const file of supersededFiles) {
+    rmSync(file)
+    const printableFile = relative(ctx.cwd, file) || file
+    ctx.stdout(
+      `[admin-generate] routes: removed ${printableFile} (superseded generated thin route file)\n`,
+    )
+  }
+  if (existing === content) {
+    ctx.stdout(summary("is up to date"))
+    return 0
+  }
+  mkdirSync(dirname(outPath), { recursive: true })
+  writeFileSync(outPath, content)
+  ctx.stdout(summary(existing === null ? "written" : "rewritten"))
+  return 0
+}
+
+/**
+ * `voyant admin generate --routes --files` — LEGACY per-route thin files
+ * (RFC §4.2 increment 1) for hosts not yet on the code-assembled module:
+ * one generated host file per zero-prop route contribution.
  *
  * Per contribution:
  * - no statically resolvable id/path → note, skipped (the generator only
  *   trusts what it can read without executing the entry)
  * - path contains `$param` segments → skipped, hand-written hosts bind params
- * - no `component` → skipped, metadata-only contribution
+ * - no `component` → skipped (thin files cannot bind lazy `page` modules —
+ *   migrate to the code-assembled module for those)
  * - an existing file WITHOUT the generated header → skipped and reported:
  *   that file is ejected (hand-written), and stays the host's own
  * - otherwise → written (or, with `--check`, compared for drift)
  */
 function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
-  const { ctx, config, configDir, results, check } = options
-  const routesConfig = readAdminRoutesConfig(config)
+  const { ctx, configDir, results, check, routesConfig } = options
   const routesDirRel = options.routesDirFlag ?? routesConfig.dir ?? DEFAULT_ROUTES_DIR
   const routesDir = isAbsolute(routesDirRel) ? routesDirRel : join(configDir, routesDirRel)
 
@@ -241,12 +447,7 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
   let metadataOnly = 0
   let drift = 0
 
-  const found = results.filter(
-    (result): result is AdminEntryScanResult & { importSpec: string; sourcePath: string } =>
-      result.status === "found" &&
-      result.importSpec !== undefined &&
-      result.sourcePath !== undefined,
-  )
+  const found = foundEntries(results)
 
   for (const entry of found) {
     let source: string
@@ -313,7 +514,7 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
         preload: contribution.preload,
         hasLoader: contribution.hasLoader,
         hasValidateSearch: contribution.hasValidateSearch,
-        runtime: routesConfig.runtime,
+        runtime: routesConfig.imports,
       })
 
       if (existing === content) {
@@ -324,8 +525,8 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
         drift++
         ctx.stderr(
           existing === null
-            ? `[admin-generate] routes: ${printable} is missing — run \`voyant admin generate --routes\`\n`
-            : `[admin-generate] routes: ${printable} is out of date — run \`voyant admin generate --routes\`\n`,
+            ? `[admin-generate] routes: ${printable} is missing — run \`voyant admin generate --routes --files\`\n`
+            : `[admin-generate] routes: ${printable} is out of date — run \`voyant admin generate --routes --files\`\n`,
         )
         continue
       }

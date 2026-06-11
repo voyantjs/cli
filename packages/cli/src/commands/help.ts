@@ -11,7 +11,7 @@ OPEN-SOURCE COMMANDS
   generate link <a> <b>              Emit a defineLink snippet (a, b as <module>.<entity>)
   config <show|validate|path>        Inspect the nearest voyant.config.* manifest
   admin generate [--check]           Emit admin.extensions.generated.ts from the manifest
-  admin generate --routes [--check]  Emit generated thin route files for zero-prop extension routes
+  admin generate --routes [--check]  Emit the code-assembled admin route module (--files: legacy thin files)
   admin doctor                       Report manifest <-> admin extension <-> route/destination drift
   dev --file <path>                  Watch and serve workflows locally with hot reload
   db <generate|migrate|studio|push>  Proxy drizzle-kit commands (generate defaults to --prefix timestamp)
