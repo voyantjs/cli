@@ -426,6 +426,73 @@ describe("adminGenerateCommand --routes (code-assembled module)", () => {
 
   const modulePath = () => join(tmp, "src", "admin.routes.generated.tsx")
 
+  const METADATA_ONLY_SOURCE = `
+export function createFooAdminExtension(options = {}) {
+  return { id: "foo", routes: [{ id: "foo-meta", path: "/foo-meta", title: "Meta" }] }
+}
+`
+
+  it("removes a stale generated module when no implemented contributions remain", async () => {
+    writeModuleFixture(tmp)
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    expect(readFileSync(modulePath(), "utf8")).toContain("FooIndexRoute")
+
+    // The module's admin entry drops to metadata-only contributions.
+    writeFileSync(
+      join(tmp, "node_modules", "@voyantjs", "foo-react", "src", "admin", "index.tsx"),
+      METADATA_ONLY_SOURCE,
+    )
+
+    const check = makeCtx(["--routes", "--check"], tmp)
+    expect(await adminGenerateCommand(check.ctx)).toBe(1)
+    expect(check.stderr.join("")).toContain("is stale — no implemented extension")
+
+    const write = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(write.ctx)).toBe(0)
+    expect(write.stdout.join("")).toContain("removed src/admin.routes.generated.tsx")
+    expect(existsSync(modulePath())).toBe(false)
+  })
+
+  it("leaves an ejected module in place at zero implemented contributions", async () => {
+    writeModuleFixture(tmp)
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    const ejected = readFileSync(modulePath(), "utf8").split("\n").slice(6).join("\n")
+    writeFileSync(modulePath(), ejected)
+    writeFileSync(
+      join(tmp, "node_modules", "@voyantjs", "foo-react", "src", "admin", "index.tsx"),
+      METADATA_ONLY_SOURCE,
+    )
+
+    const { ctx, stderr } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(stderr.join("")).toContain("no generated header (ejected, host-owned)")
+    expect(existsSync(modulePath())).toBe(true)
+  })
+
+  it("derives the workspace alias from an absolute routes dir inside the project", async () => {
+    writeModuleFixture(tmp)
+    const { ctx } = makeCtx(
+      ["--routes", "--routes-dir", join(tmp, "src", "routes", "_workspace")],
+      tmp,
+    )
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(readFileSync(modulePath(), "utf8")).toContain(
+      `import { Route as WorkspaceRoute } from "@/routes/_workspace/route"`,
+    )
+  })
+
+  it("errors when an absolute routes dir resolves outside the project root", async () => {
+    writeModuleFixture(tmp)
+    const outside = mkdtempSync(join(tmpdir(), "voyant-cli-outside-"))
+    try {
+      const { ctx, stderr } = makeCtx(["--routes", "--routes-dir", outside], tmp)
+      expect(await adminGenerateCommand(ctx)).toBe(1)
+      expect(stderr.join("")).toContain("resolves outside the project root")
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
   it("emits one code-assembled module — param routes included, metadata-only skipped", async () => {
     writeModuleFixture(tmp)
     const { ctx, stdout } = makeCtx(["--routes"], tmp)

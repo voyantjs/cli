@@ -350,6 +350,28 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
   const routeCount = sections.reduce((sum, section) => sum + section.routes.length, 0)
 
   if (routeCount === 0) {
+    const stale = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
+    if (stale !== null && isGeneratedRouteFile(stale)) {
+      if (check) {
+        ctx.stderr(
+          `[admin-generate] routes: ${printableOut} is stale — no implemented extension ` +
+            `route contributions remain; run \`voyant admin generate --routes\`\n`,
+        )
+        return 1
+      }
+      rmSync(outPath)
+      ctx.stdout(
+        `[admin-generate] routes: removed ${printableOut} — no implemented extension ` +
+          `route contributions remain\n`,
+      )
+      return 0
+    }
+    if (stale !== null) {
+      ctx.stderr(
+        `[admin-generate] routes: ${printableOut} has no generated header (ejected, ` +
+          `host-owned) — left in place despite zero implemented contributions\n`,
+      )
+    }
     ctx.stdout(
       `[admin-generate] routes: no implemented extension route contributions across ` +
         `${found.length} admin entries — nothing to emit\n`,
@@ -357,13 +379,29 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
     return 0
   }
 
+  // Alias derivation needs a config-relative dir: an absolute --routes-dir
+  // would otherwise produce imports like `@//abs/path/...`.
+  const routesDirForAlias = isAbsolute(routesDirRel)
+    ? relative(configDir, routesDirRel).replaceAll("\\", "/")
+    : routesDirRel
+  if (
+    !routesConfig.workspaceRouteModule &&
+    (routesDirForAlias.startsWith("..") || isAbsolute(routesDirForAlias))
+  ) {
+    ctx.stderr(
+      `[admin-generate] routes: --routes-dir resolves outside the project root — set ` +
+        `admin.routes.workspaceRouteModule in voyant.config.* to the host's workspace ` +
+        `layout import\n`,
+    )
+    return 1
+  }
   const content = renderAdminRoutesModule({
     moduleBaseName: basename(outPath).replace(/\.[^.]+$/, ""),
     sections,
     imports: routesConfig.imports,
     workspaceRouteModule:
-      routesConfig.workspaceRouteModule ?? workspaceRouteModuleFor(routesDirRel),
-    routeIdPrefix: routeIdPrefixFor(routesDirRel),
+      routesConfig.workspaceRouteModule ?? workspaceRouteModuleFor(routesDirForAlias),
+    routeIdPrefix: routeIdPrefixFor(routesDirForAlias),
   })
 
   const existing = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
