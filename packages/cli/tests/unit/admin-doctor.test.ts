@@ -322,3 +322,207 @@ export function createFooAdminExtension(options = {}) {
     })
   })
 })
+
+describe("Finding D — generated-resolver gate (RFC §4.7 endgame)", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "voyant-cli-admin-doctor-gate-"))
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  const ANNOTATED_SOURCE = `
+declare module "@voyantjs/admin" {
+  interface AdminDestinations {
+    "foo.list": Record<string, never>
+    "foo.detail": { fooId: string }
+    "foo.custom": { tab?: string }
+  }
+}
+export function createFooAdminExtension(options = {}) {
+  const { basePath = "/foo" } = options
+  return defineAdminExtension({
+    id: "foo",
+    routes: [
+      { id: "foo-index", path: basePath, title: "Foo", destination: "foo.list", page: () => import("./foo.js") },
+      {
+        id: "foo-detail",
+        path: \`\${basePath}/$id\`,
+        title: "Foo",
+        destination: "foo.detail",
+        destinationParams: { id: "fooId" },
+        page: () => import("./foo-detail.js"),
+      },
+    ],
+  })
+}
+`
+
+  function writeGateFixture(root: string, source = ANNOTATED_SOURCE) {
+    writeFileSync(join(root, "voyant.config.ts"), `export default { modules: ["@voyantjs/foo"] }\n`)
+    writePackage(root, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
+    writePackage(
+      root,
+      "@voyantjs/foo-react",
+      { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
+      { "src/admin/index.tsx": source },
+    )
+    // Host resolver map: spreads the generated map, hand-writes the custom key.
+    mkdirSync(join(root, "src", "lib"), { recursive: true })
+    writeFileSync(
+      join(root, "src", "lib", "admin-destinations.ts"),
+      [
+        `import type { AdminDestinationResolvers } from "@voyantjs/admin"`,
+        `import { generatedAdminDestinations } from "@/admin.destinations.generated"`,
+        ``,
+        `export const destinations = {`,
+        `  ...generatedAdminDestinations,`,
+        `  "foo.custom": () => "/foo?tab=custom",`,
+        `} satisfies AdminDestinationResolvers`,
+        ``,
+      ].join("\n"),
+    )
+  }
+
+  async function composeAll(root: string) {
+    expect(await adminGenerateCommand(makeCtx([], root).ctx)).toBe(0)
+    expect(await adminGenerateCommand(makeCtx(["--destinations"], root).ctx)).toBe(0)
+  }
+
+  it("is clean (exit 0) when the generated map matches the annotations", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    const out = stdout.join("")
+    expect(out).not.toContain(" D: ")
+    expect(out).toContain("0 finding(s)")
+  })
+
+  it("gates (exit 1) when annotations exist but the generated module is missing", async () => {
+    writeGateFixture(tmp)
+    expect(await adminGenerateCommand(makeCtx([], tmp).ctx)).toBe(0)
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(1)
+    const out = stdout.join("")
+    expect(out).toContain("is missing but 2 route contribution(s) declare a destination")
+    expect(out).toContain("[gate]")
+    expect(out).toContain("gating, exit 1")
+  })
+
+  it("gates (exit 1) on an annotated destination missing from the generated module", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    // A new annotation lands in the package without regenerating.
+    writeGateFixture(
+      tmp,
+      ANNOTATED_SOURCE.replace(
+        `{ id: "foo-index", path: basePath, title: "Foo", destination: "foo.list", page: () => import("./foo.js") },`,
+        [
+          `{ id: "foo-index", path: basePath, title: "Foo", destination: "foo.list", page: () => import("./foo.js") },`,
+          `{ id: "foo-extra", path: \`\${basePath}/extra\`, title: "Foo", destination: "foo.custom", page: () => import("./foo-extra.js") },`,
+        ].join("\n      "),
+      ),
+    )
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(1)
+    const out = stdout.join("")
+    expect(out).toContain(
+      `D: annotated destination "foo.custom" (@voyantjs/foo-react/admin) has no resolver`,
+    )
+    expect(out).toContain("[gate]")
+  })
+
+  it("gates (exit 1) on a generated resolver whose annotation vanished", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    // The annotation is removed from the package without regenerating.
+    writeGateFixture(tmp, ANNOTATED_SOURCE.replace(`destination: "foo.list",`, ""))
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(1)
+    const out = stdout.join("")
+    expect(out).toContain(
+      `D: generated resolver for "foo.list" in src/admin.destinations.generated.ts matches no`,
+    )
+    expect(out).toContain("[gate]")
+  })
+
+  it("gates (exit 1) on pure content drift even when the key sets match", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    // Same keys, different param mapping → emission drift.
+    writeGateFixture(tmp, ANNOTATED_SOURCE.replace(`destinationParams: { id: "fooId" },`, ""))
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(1)
+    expect(stdout.join("")).toContain(
+      "D: src/admin.destinations.generated.ts is out of date — run `voyant admin generate --destinations` [gate]",
+    )
+  })
+
+  it("skips the gate for an ejected module but keeps its keys for custom parity", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    // Eject: strip the generated header, keep a host-owned map with the keys.
+    const outPath = join(tmp, "src", "admin.destinations.generated.ts")
+    writeFileSync(
+      outPath,
+      [
+        `// host-owned`,
+        `export const generatedAdminDestinations = {`,
+        `  "foo.list": () => "/foo",`,
+        `  "foo.detail": ({ fooId }: { fooId: string }) => "/foo/" + fooId,`,
+        `} satisfies Partial<AdminDestinationResolvers>`,
+        ``,
+      ].join("\n"),
+    )
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    const out = stdout.join("")
+    expect(out).toContain("skipped generated-destinations gate")
+    expect(out).toContain("ejected, host-owned")
+    // foo.list / foo.detail resolve through the ejected map — no D parity findings.
+    expect(out).not.toContain(`D: destination "foo.list"`)
+    expect(out).not.toContain(`D: destination "foo.detail"`)
+  })
+
+  it("custom-resolver parity stays report-only (exit 0)", async () => {
+    writeGateFixture(tmp)
+    await composeAll(tmp)
+    // A hand-written resolver for an undeclared key + a declared key with no
+    // resolver anywhere — both report, neither gates.
+    writeFileSync(
+      join(tmp, "src", "lib", "admin-destinations.ts"),
+      [
+        `import type { AdminDestinationResolvers } from "@voyantjs/admin"`,
+        `import { generatedAdminDestinations } from "@/admin.destinations.generated"`,
+        ``,
+        `export const destinations = {`,
+        `  ...generatedAdminDestinations,`,
+        `  "gone.detail": () => "/gone",`,
+        `} satisfies AdminDestinationResolvers`,
+        ``,
+      ].join("\n"),
+    )
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    const out = stdout.join("")
+    expect(out).toContain(`D: resolver for "gone.detail"`)
+    expect(out).toContain(`D: destination "foo.custom"`)
+    expect(out).not.toContain("[gate]")
+    expect(out).toContain("2 finding(s)")
+  })
+
+  it("honors --destinations-out for a non-default generated module path", async () => {
+    writeGateFixture(tmp)
+    expect(await adminGenerateCommand(makeCtx([], tmp).ctx)).toBe(0)
+    const custom = join(tmp, "src", "nav.generated.ts")
+    expect(await adminGenerateCommand(makeCtx(["--destinations", "--out", custom], tmp).ctx)).toBe(
+      0,
+    )
+    const { ctx } = makeCtx(["--destinations-out", custom], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+  })
+})

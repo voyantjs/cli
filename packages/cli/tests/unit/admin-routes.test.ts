@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest"
 
 import {
   canonicalRouteFileRelPath,
+  collectDestinationBindings,
   DEFAULT_ROUTES_MODULE_IMPORTS,
   fileRouteIdFor,
+  GENERATED_DESTINATIONS_HEADER,
   GENERATED_ROUTE_HEADER,
   isExportedIdent,
+  isGeneratedDestinationsFile,
   isGeneratedRouteFile,
   isImplementedContribution,
+  renderAdminDestinationsModule,
   renderAdminRoutesModule,
   renderRouteFile,
   resolveAdminRoutesManifestConfig,
@@ -15,6 +19,7 @@ import {
   routeIdPrefixFor,
   scanDeclaredDestinationKeys,
   scanExtensionId,
+  scanGeneratedDestinationKeys,
   scanGeneratedModuleRoutePaths,
   scanResolverMapKeys,
   scanRouteContributions,
@@ -243,6 +248,39 @@ describe("isExportedIdent", () => {
     expect(isExportedIdent(source, "f")).toBe(true)
     expect(isExportedIdent(source, "e")).toBe(false)
     expect(isExportedIdent(source, "nope")).toBe(false)
+  })
+})
+
+describe("destination bindings — unresolvable param maps", () => {
+  it("skips a binding whose destinationParams is not an object literal", () => {
+    const source = `
+declare module "@voyantjs/admin" {
+  interface AdminDestinations {
+    "foo.detail": { fooId: string }
+  }
+}
+const PARAM_MAP = { id: "fooId" }
+export function createFooAdminExtension() {
+  return {
+    id: "foo",
+    routes: [
+      {
+        id: "foo-detail",
+        path: "/foo/$id",
+        title: "Foo",
+        component: FooDetail,
+        destination: "foo.detail",
+        destinationParams: PARAM_MAP,
+      },
+    ],
+  }
+}
+`
+    const { bindings, notes } = collectDestinationBindings([
+      { importSpec: "@voyantjs/foo-react/admin", source },
+    ])
+    expect(bindings).toHaveLength(0)
+    expect(notes.join("\n")).toContain("not a statically-resolvable object literal")
   })
 })
 
@@ -531,5 +569,205 @@ describe("renderAdminRoutesModule", () => {
     expect(content).toContain(`  "/bookings/$id": typeof BookingsDetailRoute`)
     expect(content).toContain(`  "/_workspace/bookings/$id": typeof BookingsDetailRoute`)
     expect(content.endsWith("}\n")).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Generated destination resolvers (packaged-admin RFC §4.7 endgame)
+// ---------------------------------------------------------------------------
+
+const DESTINATION_SOURCE = `
+export function createSuppliersishAdminExtension(options = {}) {
+  const { basePath = "/suppliersish", labels = {} } = options
+  return defineAdminExtension({
+    id: "suppliersish",
+    routes: [
+      {
+        id: "suppliersish-index",
+        path: basePath,
+        title: "Suppliers",
+        // Route-backed destination (RFC §4.7 endgame).
+        destination: "supplierish.list",
+        page: () => import("./suppliers-host.js"),
+      },
+      {
+        id: "suppliersish-detail",
+        path: \`\${basePath}/$id\`,
+        title: "Suppliers",
+        destination: "supplierish.detail",
+        destinationParams: { id: "supplierId" },
+        page: () => import("./pages/supplier-detail-page.js"),
+      },
+      {
+        id: "suppliersish-notes",
+        path: \`\${basePath}/$id/notes/$noteId\`,
+        title: "Notes",
+        destination: "supplierishNote.detail",
+        destinationParams: { noteId: "supplierNoteId" },
+        page: () => import("./pages/supplier-note-page.js"),
+      },
+      {
+        id: "suppliersish-plain",
+        path: \`\${basePath}/plain\`,
+        title: "Plain",
+        page: () => import("./pages/plain.js"),
+      },
+    ],
+  })
+}
+`
+
+describe("scanRouteContributions — destination annotations", () => {
+  it("extracts destination keys and param maps", () => {
+    const routes = scanRouteContributions(DESTINATION_SOURCE)
+    expect(routes.map((route) => route.destination)).toEqual([
+      "supplierish.list",
+      "supplierish.detail",
+      "supplierishNote.detail",
+      null,
+    ])
+    expect(routes[1]?.destinationParams).toEqual({ id: "supplierId" })
+    expect(routes[2]?.destinationParams).toEqual({ noteId: "supplierNoteId" })
+    // Absent map = undefined (identity mapping OK); null is reserved for
+    // present-but-unresolvable literals, which must skip the binding.
+    expect(routes[0]?.destinationParams).toBeUndefined()
+  })
+
+  it("treats a non-static destinationParams map as unresolvable", () => {
+    const source = `
+      routes: [
+        { id: "x", path: "/x/$id", destination: "x.detail", destinationParams: { id: someIdent } },
+      ],
+    `
+    const [route] = scanRouteContributions(source)
+    expect(route?.destination).toBe("x.detail")
+    expect(route?.destinationParams).toBeNull()
+  })
+})
+
+describe("collectDestinationBindings", () => {
+  it("collects annotated contributions sorted by key", () => {
+    const { bindings, notes } = collectDestinationBindings([
+      { importSpec: "@voyantjs/suppliersish-react/admin", source: DESTINATION_SOURCE },
+    ])
+    expect(notes).toEqual([])
+    expect(bindings.map((binding) => binding.key)).toEqual([
+      "supplierish.detail",
+      "supplierish.list",
+      "supplierishNote.detail",
+    ])
+    expect(bindings[0]).toMatchObject({
+      key: "supplierish.detail",
+      path: "/suppliersish/$id",
+      importSpec: "@voyantjs/suppliersish-react/admin",
+      params: { id: "supplierId" },
+    })
+  })
+
+  it("notes and skips annotations with unresolvable paths", () => {
+    const source = `
+      routes: [
+        { id: "x", path: somewhereElse, destination: "x.list" },
+      ],
+    `
+    const { bindings, notes } = collectDestinationBindings([
+      { importSpec: "@voyantjs/x-react/admin", source },
+    ])
+    expect(bindings).toEqual([])
+    expect(notes.join("\n")).toContain('skipped destination "x.list"')
+    expect(notes.join("\n")).toContain("not statically resolvable")
+  })
+
+  it("keeps the first binding for a duplicated key and notes the duplicate", () => {
+    const first = `routes: [{ id: "a", path: "/a", destination: "shared.list" }]`
+    const second = `routes: [{ id: "b", path: "/b", destination: "shared.list" }]`
+    const { bindings, notes } = collectDestinationBindings([
+      { importSpec: "@voyantjs/a-react/admin", source: first },
+      { importSpec: "@voyantjs/b-react/admin", source: second },
+    ])
+    expect(bindings).toHaveLength(1)
+    expect(bindings[0]?.path).toBe("/a")
+    expect(notes.join("\n")).toContain('skipped duplicate destination "shared.list"')
+    expect(notes.join("\n")).toContain("@voyantjs/a-react/admin /a")
+  })
+})
+
+describe("renderAdminDestinationsModule", () => {
+  const { bindings } = collectDestinationBindings([
+    { importSpec: "@voyantjs/suppliersish-react/admin", source: DESTINATION_SOURCE },
+  ])
+  const content = renderAdminDestinationsModule({
+    bindings,
+    importSpecs: ["@voyantjs/suppliersish-react/admin", "@voyantjs/other-react/admin"],
+  })
+
+  it("emits the generated header and the ejection contract", () => {
+    expect(isGeneratedDestinationsFile(content)).toBe(true)
+    expect(content).toContain(`${GENERATED_DESTINATIONS_HEADER} — do not edit.`)
+    expect(content).toContain("To eject the whole map, delete this header")
+  })
+
+  it("binds every admin entry's augmentations type-only, sorted", () => {
+    const otherIndex = content.indexOf(`import type {} from "@voyantjs/other-react/admin"`)
+    const suppliersIndex = content.indexOf(
+      `import type {} from "@voyantjs/suppliersish-react/admin"`,
+    )
+    expect(otherIndex).toBeGreaterThan(-1)
+    expect(suppliersIndex).toBeGreaterThan(otherIndex)
+    expect(content).toContain(`import type { AdminDestinationResolvers } from "@voyantjs/admin"`)
+  })
+
+  it("emits param-less resolvers as plain string returns", () => {
+    expect(content).toContain(`"supplierish.list": () => "/suppliersish",`)
+  })
+
+  it("emits path interpolation with encodeURIComponent and mapped param names", () => {
+    expect(content).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting emitted template-literal source
+      '"supplierish.detail": ({ supplierId }) => `/suppliersish/${encodeURIComponent(supplierId)}`,',
+    )
+    // Unmapped params keep their route name; mapped ones rename.
+    expect(content).toContain('"supplierishNote.detail": ({ id, supplierNoteId }) =>')
+    expect(content).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting emitted template-literal source
+      "`/suppliersish/${encodeURIComponent(id)}/notes/${encodeURIComponent(supplierNoteId)}`,",
+    )
+  })
+
+  it("closes with the Partial satisfies marker scanGeneratedDestinationKeys reads", () => {
+    expect(content).toContain("} satisfies Partial<AdminDestinationResolvers>")
+    expect(scanGeneratedDestinationKeys(content)).toEqual([
+      "supplierish.detail",
+      "supplierish.list",
+      "supplierishNote.detail",
+    ])
+  })
+
+  it("is deterministic", () => {
+    expect(
+      renderAdminDestinationsModule({
+        bindings,
+        importSpecs: ["@voyantjs/other-react/admin", "@voyantjs/suppliersish-react/admin"],
+      }),
+    ).toBe(content)
+  })
+})
+
+describe("scanGeneratedDestinationKeys", () => {
+  it("returns null when no Partial-satisfies map exists", () => {
+    expect(scanGeneratedDestinationKeys(`export const x = { "a.b": () => "/a" }`)).toBeNull()
+    expect(
+      scanGeneratedDestinationKeys(
+        `export const x = { "a.b": () => "/a" } satisfies AdminDestinationResolvers`,
+      ),
+    ).toBeNull()
+  })
+
+  it("returns the empty list for an empty generated map", () => {
+    expect(
+      scanGeneratedDestinationKeys(
+        `export const x = {} satisfies Partial<AdminDestinationResolvers>`,
+      ),
+    ).toEqual([])
   })
 })

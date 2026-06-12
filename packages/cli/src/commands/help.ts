@@ -12,7 +12,9 @@ OPEN-SOURCE COMMANDS
   config <show|validate|path>        Inspect the nearest voyant.config.* manifest
   admin generate [--check]           Emit admin.extensions.generated.ts from the manifest
   admin generate --routes [--check]  Emit the code-assembled admin route module (--files: legacy thin files)
-  admin doctor                       Report manifest <-> admin extension <-> route/destination drift
+  admin generate --destinations [--check]  Emit the generated destination resolver map (RFC 4.7)
+  admin doctor                       Check manifest <-> admin extension <-> route/destination parity
+                                     (generated-destination drift gates: exit 1; the rest reports)
   dev --file <path>                  Watch and serve workflows locally with hot reload
   db <generate|migrate|studio|push>  Proxy drizzle-kit commands (generate defaults to --prefix timestamp)
   db schemas [--emit]                Print/emit the manifest-derived schema list
@@ -41,6 +43,7 @@ EXAMPLES
   voyant config show
   voyant admin generate --check
   voyant admin generate --routes
+  voyant admin generate --destinations
   voyant admin doctor
   voyant db generate
   voyant exec ./scripts/backfill.ts --dry-run
