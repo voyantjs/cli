@@ -50,7 +50,7 @@ export interface ScannedRouteContribution {
    * `destinationParams:` object literal mapping route param name →
    * destination param name, or null when absent / not statically resolvable.
    */
-  destinationParams: Record<string, string> | null
+  destinationParams: Record<string, string> | null | undefined
 }
 
 /** Does the contribution carry an implementation (`page` or `component`)? */
@@ -440,7 +440,9 @@ function parseContribution(
     ssr: null,
     preload: null,
     destination: null,
-    destinationParams: null,
+    // undefined = absent (identity mapping OK); null = present but not a
+    // statically-resolvable object literal (binding must be skipped).
+    destinationParams: undefined,
   }
 
   for (const rawEntry of splitTopLevel(objectBody)) {
@@ -621,6 +623,14 @@ export function collectDestinationBindings(
         notes.push(
           `skipped destination "${contribution.destination}" (${entry.importSpec}) — ` +
             `its route path is not statically resolvable`,
+        )
+        continue
+      }
+      if (contribution.destinationParams === null) {
+        notes.push(
+          `skipped destination "${contribution.destination}" (${entry.importSpec} ` +
+            `${contribution.path}) — destinationParams is not a statically-resolvable ` +
+            `object literal`,
         )
         continue
       }

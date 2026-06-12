@@ -251,6 +251,39 @@ describe("isExportedIdent", () => {
   })
 })
 
+describe("destination bindings — unresolvable param maps", () => {
+  it("skips a binding whose destinationParams is not an object literal", () => {
+    const source = `
+declare module "@voyantjs/admin" {
+  interface AdminDestinations {
+    "foo.detail": { fooId: string }
+  }
+}
+const PARAM_MAP = { id: "fooId" }
+export function createFooAdminExtension() {
+  return {
+    id: "foo",
+    routes: [
+      {
+        id: "foo-detail",
+        path: "/foo/$id",
+        title: "Foo",
+        component: FooDetail,
+        destination: "foo.detail",
+        destinationParams: PARAM_MAP,
+      },
+    ],
+  }
+}
+`
+    const { bindings, notes } = collectDestinationBindings([
+      { importSpec: "@voyantjs/foo-react/admin", source },
+    ])
+    expect(bindings).toHaveLength(0)
+    expect(notes.join("\n")).toContain("not a statically-resolvable object literal")
+  })
+})
+
 describe("scanGeneratedModuleRoutePaths", () => {
   it("collects the path literals of createRoute calls", () => {
     const source = `
@@ -595,7 +628,9 @@ describe("scanRouteContributions — destination annotations", () => {
     ])
     expect(routes[1]?.destinationParams).toEqual({ id: "supplierId" })
     expect(routes[2]?.destinationParams).toEqual({ noteId: "supplierNoteId" })
-    expect(routes[0]?.destinationParams).toBeNull()
+    // Absent map = undefined (identity mapping OK); null is reserved for
+    // present-but-unresolvable literals, which must skip the binding.
+    expect(routes[0]?.destinationParams).toBeUndefined()
   })
 
   it("treats a non-static destinationParams map as unresolvable", () => {
