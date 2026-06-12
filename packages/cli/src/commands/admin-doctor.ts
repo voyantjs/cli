@@ -2,13 +2,14 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { VoyantConfig } from "@voyantjs/core/config"
-
+import { resolveCoreAdminEntry } from "../lib/admin-core-entry.js"
 import {
   type AdminEntryScanResult,
   DEFAULT_GENERATED_RELATIVE_PATH,
   scanAdminEntries,
 } from "../lib/admin-entries.js"
 import {
+  collectContributionRoutePaths,
   collectDestinationBindings,
   DEFAULT_GENERATED_DESTINATIONS_MODULE_RELATIVE_PATH,
   DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH,
@@ -49,8 +50,12 @@ export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts
  *   the manifest's `admin.routes.dir`) NOR by an entry in the host's
  *   code-assembled admin route module (default
  *   `src/admin.routes.generated.tsx`, override with `--routes-out` or the
- *   manifest's `admin.routes.out` — see packaged-admin RFC §4.8). Static
- *   scan only — nothing is imported.
+ *   manifest's `admin.routes.out` — see packaged-admin RFC §4.8). Nested
+ *   `children` are traversed (absolute paths reconstructed on both sides);
+ *   redirect-only contributions count as implemented and are satisfied by a
+ *   module entry alone; the built-in core entry
+ *   (`@voyantjs/admin-app/core-extension`) participates when resolvable.
+ *   Static scan only — nothing is imported.
  * - **D** — destination parity (RFC §4.7). Two halves:
  *   - GENERATED (gate, exit 1): the generated resolver module (default
  *     `src/admin.destinations.generated.ts`, override with
@@ -173,8 +178,27 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
         `${printableRoutesModule} in host\n`,
     )
   } else {
-    for (const entry of found) {
-      for (const routePath of declaredRoutePaths(entry)) {
+    // Manifest entries plus the built-in core entry (when resolvable): its
+    // static contribution table — including the settings children and the
+    // index redirect — must be bound like any other entry's. Redirect
+    // contributions bound in the generated module satisfy their path with no
+    // file and no page; runtime-bound children (e.g. settings extraPages)
+    // are invisible to the static scan and never reported.
+    const coreEntry = resolveCoreAdminEntry(configDir)
+    const routeParityEntries: Array<{ importSpec: string; paths: string[] }> = found.map(
+      (entry) => ({
+        importSpec: entry.importSpec ?? entry.moduleName,
+        paths: declaredRoutePaths(entry),
+      }),
+    )
+    if (coreEntry) {
+      routeParityEntries.push({
+        importSpec: coreEntry.importSpec,
+        paths: collectContributionRoutePaths(coreEntry.contributions),
+      })
+    }
+    for (const entry of routeParityEntries) {
+      for (const routePath of entry.paths) {
         if (routesModulePaths.has(routePath)) continue
         if (routeFileExists(routesDir, routePath)) continue
         report(
@@ -345,10 +369,11 @@ export function parseImportSpecs(source: string): string[] {
 /**
  * Statically scan an admin entry's route contributions for declared route
  * paths: the resolved `path:` of every contribution in the entry's
- * `routes: [...]` array (option-destructuring defaults and template-literal
- * paths resolve through {@link scanRouteContributions}). Only absolute admin
- * paths count; contributions whose path is not statically resolvable are
- * skipped — this check stays best-effort.
+ * `routes: [...]` array, descending into nested `children` (parent-relative
+ * paths resolve to absolute ones; index children are skipped — see
+ * {@link collectContributionRoutePaths}). Only absolute admin paths count;
+ * contributions whose path is not statically resolvable are skipped — this
+ * check stays best-effort.
  */
 function declaredRoutePaths(entry: AdminEntryScanResult): string[] {
   if (!entry.sourcePath) return []
@@ -358,12 +383,7 @@ function declaredRoutePaths(entry: AdminEntryScanResult): string[] {
   } catch {
     return []
   }
-  const paths = new Set<string>()
-  for (const contribution of scanRouteContributions(source)) {
-    const value = contribution.path
-    if (value?.startsWith("/") && value !== "/") paths.add(value)
-  }
-  return [...paths]
+  return collectContributionRoutePaths(scanRouteContributions(source))
 }
 
 /**

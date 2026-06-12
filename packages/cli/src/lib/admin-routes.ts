@@ -51,11 +51,27 @@ export interface ScannedRouteContribution {
    * destination param name, or null when absent / not statically resolvable.
    */
   destinationParams: Record<string, string> | null | undefined
+  /** A `redirectTo:` value is present (redirect-only contributions are implemented). */
+  hasRedirectTo: boolean
+  /**
+   * Resolved `redirectTo:` target (template-literal-resolved like `path`),
+   * or null when absent / not statically resolvable.
+   */
+  redirectTo: string | null
+  /**
+   * Nested child contributions of a `children: [...]` array literal (their
+   * paths are PARENT-RELATIVE; `"/"` is the parent's index route), or null
+   * when the contribution has no statically scannable children. Spread
+   * elements inside the array (runtime-known children, e.g. app-supplied
+   * extra settings pages) are invisible to the scanner by design — hosts
+   * bind those at runtime via `adminExtensionChildRoutes`.
+   */
+  children: ScannedRouteContribution[] | null
 }
 
-/** Does the contribution carry an implementation (`page` or `component`)? */
+/** Does the contribution carry an implementation (`page`, `component`, or `redirectTo`)? */
 export function isImplementedContribution(contribution: ScannedRouteContribution): boolean {
-  return contribution.hasPage || contribution.hasComponent
+  return contribution.hasPage || contribution.hasComponent || contribution.hasRedirectTo
 }
 
 /** Runtime-import bindings for generated route files. */
@@ -390,9 +406,22 @@ export function scanRouteContributions(source: string): ScannedRouteContribution
   if (openBracket === -1) return []
   const closeBracket = findMatching(source, openBracket)
   if (closeBracket === -1) return []
-  const arrayBody = source.slice(openBracket + 1, closeBracket)
-  const defaults = collectStringDefaults(source)
+  return scanContributionObjects(
+    source.slice(openBracket + 1, closeBracket),
+    collectStringDefaults(source),
+  )
+}
 
+/**
+ * Parse every top-level object literal of a contribution-array body. Spread
+ * elements and anything else that is not an object literal are skipped —
+ * which is exactly how runtime-known children (e.g. `...extraPages.map(...)`)
+ * stay invisible to the static scan.
+ */
+function scanContributionObjects(
+  arrayBody: string,
+  defaults: Map<string, string>,
+): ScannedRouteContribution[] {
   const contributions: ScannedRouteContribution[] = []
   let i = 0
   while (i < arrayBody.length) {
@@ -411,6 +440,15 @@ export function scanRouteContributions(source: string): ScannedRouteContribution
         i = skipped
         continue
       }
+    }
+    // A non-object element (spread call, array, parenthesized expression) is
+    // skipped wholesale so object literals nested INSIDE it (e.g. the arrow
+    // body of `...extraPages.map((page) => ({ ... }))`) are not mistaken for
+    // contributions of this array.
+    if (ch === "(" || ch === "[") {
+      const close = findMatching(arrayBody, i)
+      i = close === -1 ? arrayBody.length : close + 1
+      continue
     }
     if (ch === "{") {
       const close = findMatching(arrayBody, i)
@@ -443,6 +481,9 @@ function parseContribution(
     // undefined = absent (identity mapping OK); null = present but not a
     // statically-resolvable object literal (binding must be skipped).
     destinationParams: undefined,
+    hasRedirectTo: false,
+    redirectTo: null,
+    children: null,
   }
 
   for (const rawEntry of splitTopLevel(objectBody)) {
@@ -498,6 +539,24 @@ function parseContribution(
       case "destinationParams":
         contribution.destinationParams = value === null ? null : parseStringRecord(value)
         break
+      case "redirectTo": {
+        // A redirect contribution needs no page/component — it counts as
+        // implemented on its own. Shorthand `redirectTo,` resolves through
+        // the destructuring defaults, exactly like `path`.
+        contribution.hasRedirectTo = true
+        contribution.redirectTo = resolvePathValue(value ?? "redirectTo", defaults)
+        break
+      }
+      case "children": {
+        // Only a `children: [...]` array literal is statically scannable;
+        // an identifier or call expression leaves children at null (the
+        // contribution is treated as a leaf).
+        if (value === null || !value.startsWith("[")) break
+        const close = findMatching(value, 0)
+        if (close === -1) break
+        contribution.children = scanContributionObjects(value.slice(1, close), defaults)
+        break
+      }
       default:
         break
     }
@@ -842,19 +901,121 @@ export function resolveSearchSchemaIdent(raw: string, source: string): string | 
 export const DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH = "src/admin.routes.generated.tsx"
 
 /**
- * The route-path literals of a code-assembled admin route module — the
- * `path: "..."` options of its `createRoute` calls. Static text scan; in the
- * generated module every `path:` literal is a route path, so a contribution
- * path appearing here is bound without any route file existing for it.
+ * The route paths a code-assembled admin route module binds.
+ *
+ * Two static text scans, unioned:
+ * - every `path: "..."` literal (in the generated module every `path:`
+ *   literal is a route path; this also keeps hand-written/ejected modules
+ *   readable best-effort), and
+ * - ABSOLUTE paths reconstructed for nested `createRoute` trees: a route
+ *   whose `getParentRoute:` accessor resolves (via `const x = () => Y`) to
+ *   another scanned route is a child — its absolute path is the parent's
+ *   absolute path plus its own relative path (`"/"` = the parent's index,
+ *   contributing the trailing-slash spelling, e.g. `/settings/`).
  */
 export function scanGeneratedModuleRoutePaths(source: string): string[] {
   const paths = new Set<string>()
-  const pattern = /\bpath\s*:\s*["']([^"']+)["']/g
-  let match: RegExpExecArray | null = pattern.exec(source)
-  while (match !== null) {
-    if (match[1] !== undefined) paths.add(match[1])
-    match = pattern.exec(source)
+  const literalPattern = /\bpath\s*:\s*["']([^"']+)["']/g
+  let literalMatch: RegExpExecArray | null = literalPattern.exec(source)
+  while (literalMatch !== null) {
+    if (literalMatch[1] !== undefined) paths.add(literalMatch[1])
+    literalMatch = literalPattern.exec(source)
   }
+
+  // Accessor thunks: `const coreSettings = () => CoreSettingsRoute`.
+  const accessorToConst = new Map<string, string>()
+  const accessorPattern = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\(\)\s*=>\s*([A-Za-z_$][\w$]*)/g
+  let accessorMatch: RegExpExecArray | null = accessorPattern.exec(source)
+  while (accessorMatch !== null) {
+    if (accessorMatch[1] !== undefined && accessorMatch[2] !== undefined) {
+      accessorToConst.set(accessorMatch[1], accessorMatch[2])
+    }
+    accessorMatch = accessorPattern.exec(source)
+  }
+
+  // Scanned `createRoute` consts with their parent accessor + path literal.
+  interface ScannedModuleRoute {
+    parentAccessor: string | null
+    path: string | null
+  }
+  const routesByConst = new Map<string, ScannedModuleRoute>()
+  const routePattern = /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*createRoute\s*\(\s*\{/g
+  let routeMatch: RegExpExecArray | null = routePattern.exec(source)
+  while (routeMatch !== null) {
+    const open = routeMatch.index + routeMatch[0].length - 1
+    const close = findMatching(source, open)
+    if (routeMatch[1] !== undefined && close !== -1) {
+      const body = source.slice(open + 1, close)
+      routesByConst.set(routeMatch[1], {
+        parentAccessor: /\bgetParentRoute\s*:\s*([A-Za-z_$][\w$]*)/.exec(body)?.[1] ?? null,
+        path: /\bpath\s*:\s*["']([^"']+)["']/.exec(body)?.[1] ?? null,
+      })
+    }
+    routeMatch = routePattern.exec(source)
+  }
+
+  const absoluteByConst = new Map<string, string | null>()
+  const resolveAbsolute = (constName: string, seen: Set<string>): string | null => {
+    const memo = absoluteByConst.get(constName)
+    if (memo !== undefined) return memo
+    if (seen.has(constName)) return null
+    seen.add(constName)
+    const route = routesByConst.get(constName)
+    if (!route || route.path === null) return null
+    const parentConst =
+      route.parentAccessor === null ? undefined : accessorToConst.get(route.parentAccessor)
+    // A parent accessor that resolves to no scanned createRoute const is a
+    // root-level layout (e.g. the imported workspace route) — the route's
+    // own path is already absolute.
+    let absolute: string | null
+    if (parentConst === undefined || !routesByConst.has(parentConst)) {
+      absolute = route.path
+    } else {
+      const parentAbsolute = resolveAbsolute(parentConst, seen)
+      absolute =
+        parentAbsolute === null ? null : `${parentAbsolute}${route.path === "/" ? "/" : route.path}`
+    }
+    absoluteByConst.set(constName, absolute)
+    return absolute
+  }
+  for (const constName of routesByConst.keys()) {
+    const absolute = resolveAbsolute(constName, new Set())
+    if (absolute !== null) paths.add(absolute)
+  }
+  return [...paths]
+}
+
+/**
+ * The statically declared ABSOLUTE route paths of a contribution list,
+ * descending into `children` (child paths are parent-relative). Used by the
+ * doctor's route-parity finding:
+ * - contributions whose path is not statically resolvable are skipped
+ *   (best-effort), as are runtime-bound children (invisible to the scan);
+ * - the root path `/` is skipped (hosts own their index route binding);
+ * - index children (`"/"`) are skipped — they are bound by the parent's
+ *   static subtree emission and have no file-route spelling of their own.
+ */
+export function collectContributionRoutePaths(
+  contributions: ReadonlyArray<ScannedRouteContribution>,
+): string[] {
+  const paths = new Set<string>()
+  const visit = (
+    nodes: ReadonlyArray<ScannedRouteContribution>,
+    parentPath: string | null,
+  ): void => {
+    for (const node of nodes) {
+      if (node.path === null) continue
+      let absolute: string | null = null
+      if (parentPath === null) {
+        if (node.path.startsWith("/")) absolute = node.path
+      } else if (node.path !== "/" && node.path.startsWith("/")) {
+        absolute = `${parentPath === "/" ? "" : parentPath}${node.path}`
+      }
+      if (absolute !== null && absolute !== "/") paths.add(absolute)
+      if (absolute !== null && node.children !== null) visit(node.children, absolute)
+    }
+  }
+  visit(contributions, null)
   return [...paths]
 }
 
@@ -957,6 +1118,10 @@ export function canonicalRouteFileRelPath(routePath: string): string {
  */
 export function alternativeRouteFileRelPaths(routePath: string): string[] {
   const rel = routePath.replace(/^\//, "")
+  // The root path's only other index spelling. The layout's own `route.tsx`
+  // is NOT a binding for `/` — a code-based index route (e.g. the core
+  // dashboard) grafts under it as the index child.
+  if (rel === "") return ["index.ts"]
   const dotted = rel.replaceAll("/", ".")
   const segments = rel.split("/")
   return [
@@ -1081,6 +1246,18 @@ export function workspaceRouteModuleFor(routesDirRel: string): string {
   return `@/${aliased}/route`
 }
 
+/** One nested child `createRoute` entry of the code-assembled module. */
+export interface AdminRoutesModuleChildRoute {
+  /** Exported route const, e.g. `CoreSettingsTeamRoute`. */
+  constName: string
+  /** Contribution id resolved through the registry, e.g. `core-settings-team`. */
+  routeId: string
+  /** PARENT-RELATIVE route path (`"/"` = the parent's index route). */
+  path: string
+  /** Exported search-schema identifier for `validateSearch:`, when resolved. */
+  searchSchemaIdent: string | null
+}
+
 /** One `createRoute` entry of the code-assembled module. */
 export interface AdminRoutesModuleRoute {
   /** Exported route const, e.g. `PromotionsIndexRoute`. */
@@ -1091,6 +1268,24 @@ export interface AdminRoutesModuleRoute {
   path: string
   /** Exported search-schema identifier for `validateSearch:`, when resolved. */
   searchSchemaIdent: string | null
+  /**
+   * Static child routes of a layout contribution (`children:` in the entry).
+   * Their presence makes this route a layout parent: the module emits a
+   * `<const>WithChildren = <const>.addChildren([...])` subtree whose tail
+   * spreads `adminExtensionChildRoutes(...)` so runtime-known children
+   * (invisible to the generator) still bind.
+   */
+  children?: ReadonlyArray<AdminRoutesModuleChildRoute>
+  /**
+   * Child paths the runtime binding must skip (already statically emitted).
+   * Defaults to the {@link children} paths.
+   */
+  excludeChildPaths?: ReadonlyArray<string>
+  /**
+   * Comment lines (each starting `// `) above the `WithChildren` const.
+   * Defaults to a generic subtree note.
+   */
+  subtreeComment?: ReadonlyArray<string>
 }
 
 /** One extension's block of the code-assembled module. */
@@ -1154,12 +1349,20 @@ export function renderAdminRoutesModule(options: RenderAdminRoutesModuleOptions)
   const schemaImportsBySpec = new Map<string, Set<string>>()
   for (const section of sections) {
     for (const route of section.routes) {
-      if (route.searchSchemaIdent === null) continue
-      const idents = schemaImportsBySpec.get(section.importSpec) ?? new Set<string>()
-      idents.add(route.searchSchemaIdent)
-      schemaImportsBySpec.set(section.importSpec, idents)
+      for (const ident of [
+        route.searchSchemaIdent,
+        ...(route.children ?? []).map((child) => child.searchSchemaIdent),
+      ]) {
+        if (ident === null) continue
+        const idents = schemaImportsBySpec.get(section.importSpec) ?? new Set<string>()
+        idents.add(ident)
+        schemaImportsBySpec.set(section.importSpec, idents)
+      }
     }
   }
+  const hasChildRoutes = sections.some((section) =>
+    section.routes.some((route) => (route.children?.length ?? 0) > 0),
+  )
   const schemaImportLines = [...schemaImportsBySpec.keys()]
     .sort()
     .flatMap((spec) =>
@@ -1190,7 +1393,9 @@ export function renderAdminRoutesModule(options: RenderAdminRoutesModuleOptions)
     "// To eject a route, remove it here (and from the maps below) and add a",
     "// hand-written route file — the generator skips files without this header.",
     `import { createRoute } from "@tanstack/react-router"`,
-    `import { adminExtensionRouteOptions } from "@voyantjs/admin-app"`,
+    hasChildRoutes
+      ? `import { adminExtensionChildRoutes, adminExtensionRouteOptions } from "@voyantjs/admin-app"`
+      : `import { adminExtensionRouteOptions } from "@voyantjs/admin-app"`,
     ...schemaImportLines,
     "",
     ...appImportLines,
@@ -1222,20 +1427,68 @@ export function renderAdminRoutesModule(options: RenderAdminRoutesModuleOptions)
       `const ${extensionConst} = extension("${section.extensionId}")`,
     )
     for (const route of section.routes) {
+      pushCreateRoute(lines, extensionConst, route, "workspace")
+      if (route.children === undefined || route.children.length === 0) continue
+
+      // Nested subtree: the parent is a layout route; static children attach
+      // through an accessor thunk and a `WithChildren` const whose tail
+      // binds runtime-known children via adminExtensionChildRoutes.
+      const accessor = toCamelIdent(route.routeId)
+      lines.push("", `const ${accessor} = () => ${route.constName}`)
+      for (const child of route.children) {
+        pushCreateRoute(lines, extensionConst, child, accessor)
+      }
       lines.push(
         "",
-        `export const ${route.constName} = createRoute({`,
-        "  getParentRoute: workspace,",
-        `  path: "${route.path}",`,
+        ...(route.subtreeComment ?? defaultSubtreeComment(route.routeId)),
+        `export const ${route.constName}WithChildren = ${route.constName}.addChildren([`,
+        ...route.children.map((child) => `  ${child.constName},`),
+        ...formatChildRoutesSpread(
+          extensionConst,
+          route.routeId,
+          accessor,
+          route.excludeChildPaths ?? route.children.map((child) => child.path),
+        ),
+        "])",
       )
-      if (route.searchSchemaIdent !== null) {
-        lines.push(`  validateSearch: ${route.searchSchemaIdent},`)
-      }
-      lines.push(...formatRouteOptionsSpread(extensionConst, route.routeId), "})")
     }
   }
 
   const allRoutes = sections.flatMap((section) => section.routes)
+  const treeConstFor = (route: AdminRoutesModuleRoute): string =>
+    (route.children?.length ?? 0) > 0 ? `${route.constName}WithChildren` : route.constName
+
+  // Typed-link map entries (key → route const), per interface. Nested
+  // subtrees fan out:
+  // - ByFullPath: parent key → WithChildren; the index child claims the
+  //   trailing-slash key (`/settings/`); other children get absolute keys.
+  // - ByTo: the index child claims the PARENT key (navigating "to" a layout
+  //   route lands on its index); the index has no key of its own.
+  // - ById: like ByFullPath, with the workspace route-id prefix.
+  const byFullPath: Array<[string, string]> = []
+  const byTo: Array<[string, string]> = []
+  const byId: Array<[string, string]> = []
+  for (const route of allRoutes) {
+    const children = route.children ?? []
+    if (children.length === 0) {
+      byFullPath.push([route.path, route.constName])
+      byTo.push([route.path, route.constName])
+      byId.push([`${routeIdPrefix}${route.path}`, route.constName])
+      continue
+    }
+    const withChildren = `${route.constName}WithChildren`
+    const indexChild = children.find((child) => child.path === "/")
+    byFullPath.push([route.path, withChildren])
+    byTo.push([route.path, indexChild === undefined ? withChildren : indexChild.constName])
+    byId.push([`${routeIdPrefix}${route.path}`, withChildren])
+    for (const child of children) {
+      const childFullPath = `${route.path}${child.path === "/" ? "/" : child.path}`
+      byFullPath.push([childFullPath, child.constName])
+      if (child.path !== "/") byTo.push([childFullPath, child.constName])
+      byId.push([`${routeIdPrefix}${childFullPath}`, child.constName])
+    }
+  }
+
   lines.push(
     "",
     SECTION_RULE,
@@ -1243,26 +1496,71 @@ export function renderAdminRoutesModule(options: RenderAdminRoutesModuleOptions)
     SECTION_RULE,
     "",
     "export const adminExtensionRoutes = [",
-    ...allRoutes.map((route) => `  ${route.constName},`),
+    ...allRoutes.map((route) => `  ${treeConstFor(route)},`),
     "]",
   )
-  for (const [interfaceName, keyFor] of [
-    ["AdminExtensionRoutesByFullPath", (route: AdminRoutesModuleRoute) => route.path],
-    ["AdminExtensionRoutesByTo", (route: AdminRoutesModuleRoute) => route.path],
-    [
-      "AdminExtensionRoutesById",
-      (route: AdminRoutesModuleRoute) => `${routeIdPrefix}${route.path}`,
-    ],
+  for (const [interfaceName, entries] of [
+    ["AdminExtensionRoutesByFullPath", byFullPath],
+    ["AdminExtensionRoutesByTo", byTo],
+    ["AdminExtensionRoutesById", byId],
   ] as const) {
     lines.push(
       "",
       `export interface ${interfaceName} {`,
-      ...allRoutes.map((route) => `  "${keyFor(route)}": typeof ${route.constName}`),
+      ...entries.map(([key, constName]) => `  "${key}": typeof ${constName}`),
       "}",
     )
   }
 
   return `${lines.join("\n")}\n`
+}
+
+function pushCreateRoute(
+  lines: string[],
+  extensionConst: string,
+  route: AdminRoutesModuleRoute | AdminRoutesModuleChildRoute,
+  parentAccessor: string,
+): void {
+  lines.push(
+    "",
+    `export const ${route.constName} = createRoute({`,
+    `  getParentRoute: ${parentAccessor},`,
+    `  path: "${route.path}",`,
+  )
+  if (route.searchSchemaIdent !== null) {
+    lines.push(`  validateSearch: ${route.searchSchemaIdent},`)
+  }
+  lines.push(...formatRouteOptionsSpread(extensionConst, route.routeId), "})")
+}
+
+/** Generic comment above a `WithChildren` const (overridable per route). */
+function defaultSubtreeComment(parentRouteId: string): string[] {
+  return [
+    `// ${parentRouteId} subtree: the static children above keep literal paths`,
+    "// for typed links; runtime-bound child contributions (invisible to the",
+    "// generator) bind at runtime via adminExtensionChildRoutes.",
+  ]
+}
+
+/** The `...adminExtensionChildRoutes(...)` tail spread, wrapped beyond line width. */
+function formatChildRoutesSpread(
+  extensionConst: string,
+  parentRouteId: string,
+  accessor: string,
+  excludePaths: ReadonlyArray<string>,
+): string[] {
+  const quoted = excludePaths.map((path) => `"${path}"`)
+  const single =
+    `  ...adminExtensionChildRoutes(${extensionConst}, "${parentRouteId}", ${accessor}, ` +
+    `runtime, { exclude: [${quoted.join(", ")}] }),`
+  if (single.length <= MAX_LINE_WIDTH) return [single]
+  return [
+    `  ...adminExtensionChildRoutes(${extensionConst}, "${parentRouteId}", ${accessor}, runtime, {`,
+    "    exclude: [",
+    ...quoted.map((entry) => `      ${entry},`),
+    "    ],",
+    "  }),",
+  ]
 }
 
 /** Camel-case an extension id for its module-local const (`crm` → `crm`). */

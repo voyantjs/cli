@@ -658,6 +658,305 @@ export function createFooAdminExtension(options = {}) {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Redirects, nested children, and the built-in core entry (RFC #1643 sweep)
+// ---------------------------------------------------------------------------
+
+const REDIRECT_AND_CHILDREN_SOURCE = `
+import { defineAdminExtension } from "@voyantjs/admin"
+
+export function createFooAdminExtension(options = {}) {
+  const { basePath = "/foo" } = options
+  return defineAdminExtension({
+    id: "foo",
+    routes: [
+      {
+        id: "foo-index",
+        path: basePath,
+        title: "Foo",
+        redirectTo: \`\${basePath}/items\`,
+      },
+      {
+        id: "foo-items",
+        path: \`\${basePath}/items\`,
+        title: "Items",
+        page: () => import("./pages/items.js"),
+      },
+      {
+        id: "foo-area",
+        path: "/foo-area",
+        title: "Area",
+        page: () => import("./pages/area-layout.js"),
+        children: [
+          { id: "foo-area-index", path: "/", title: "Area", redirectTo: "/foo-area/one" },
+          { id: "foo-area-one", path: "/one", title: "One", page: () => import("./pages/one.js") },
+          ...options.extraPages ?? [],
+        ],
+      },
+    ],
+  })
+}
+`
+
+/** Imperative factory shape — the scanner cannot read it; the CLI's built-in table applies. */
+const CORE_EXTENSION_SOURCE = `
+export function createAdminCoreExtension(options = {}) {
+  const routes = []
+  routes.push({ id: "core-dashboard", path: "/" })
+  return { id: "core", routes }
+}
+`
+
+function writeCorePackage(root: string, withCoreExtension = true) {
+  writePackage(
+    root,
+    "@voyantjs/admin-app",
+    {
+      exports: withCoreExtension
+        ? { ".": "./src/index.ts", "./core-extension": "./src/core-extension/index.tsx" }
+        : { ".": "./src/index.ts" },
+    },
+    withCoreExtension ? { "src/core-extension/index.tsx": CORE_EXTENSION_SOURCE } : {},
+  )
+}
+
+describe("adminGenerateCommand --routes — redirects + nested children", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "voyant-cli-admin-routes-nested-"))
+    writeFileSync(join(tmp, "voyant.config.ts"), `export default { modules: ["@voyantjs/foo"] }\n`)
+    writePackage(tmp, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
+    writePackage(
+      tmp,
+      "@voyantjs/foo-react",
+      { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
+      { "src/admin/index.tsx": REDIRECT_AND_CHILDREN_SOURCE },
+    )
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  const modulePath = () => join(tmp, "src", "admin.routes.generated.tsx")
+
+  it("emits redirect-only contributions as plain routes (implemented on their own)", async () => {
+    const { ctx, stdout } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    const content = readFileSync(modulePath(), "utf8")
+    expect(content).toContain(
+      [
+        "export const FooIndexRoute = createRoute({",
+        "  getParentRoute: workspace,",
+        `  path: "/foo",`,
+        `  ...adminExtensionRouteOptions(fooExtension, "foo-index", runtime),`,
+        "})",
+      ].join("\n"),
+    )
+    // Redirect leaves get plain typed-link keys in all three maps.
+    expect(content).toContain(`  "/foo": typeof FooIndexRoute`)
+    expect(content).toContain(`  "/_workspace/foo": typeof FooIndexRoute`)
+    // 1 redirect + 1 page + 1 layout parent + 2 static children = 5.
+    expect(stdout.join("")).toContain("5 extension route(s)")
+  })
+
+  it("emits a scanned children subtree with the generic comment and exclude list", async () => {
+    const { ctx } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    const content = readFileSync(modulePath(), "utf8")
+    expect(content).toContain("const fooArea = () => FooAreaRoute")
+    expect(content).toContain(
+      [
+        "export const FooAreaIndexRoute = createRoute({",
+        "  getParentRoute: fooArea,",
+        `  path: "/",`,
+        `  ...adminExtensionRouteOptions(fooExtension, "foo-area-index", runtime),`,
+        "})",
+      ].join("\n"),
+    )
+    expect(content).toContain("// foo-area subtree: the static children above keep literal paths")
+    expect(content).toContain("export const FooAreaRouteWithChildren = FooAreaRoute.addChildren([")
+    expect(content).toContain(
+      [
+        `  ...adminExtensionChildRoutes(fooExtension, "foo-area", fooArea, runtime, {`,
+        "    exclude: [",
+        `      "/",`,
+        `      "/one",`,
+        "    ],",
+        "  }),",
+        "])",
+      ].join("\n"),
+    )
+    // Maps: parent → WithChildren (FullPath/Id), index child claims the
+    // parent key in ByTo and the trailing-slash key in ByFullPath.
+    expect(content).toContain(`  "/foo-area": typeof FooAreaRouteWithChildren`)
+    expect(content).toContain(`  "/foo-area/": typeof FooAreaIndexRoute`)
+    expect(content).toContain(`  "/foo-area": typeof FooAreaIndexRoute`)
+    expect(content).toContain(`  "/foo-area/one": typeof FooAreaOneRoute`)
+    expect(content).toContain(`  "/_workspace/foo-area/": typeof FooAreaIndexRoute`)
+    // The runtime-only spread children never appear.
+    expect(content).not.toContain("extraPages")
+    // Tree array references the WithChildren const, children stay out.
+    expect(content).toContain("  FooAreaRouteWithChildren,")
+    expect(content).not.toContain("\n  FooAreaIndexRoute,\n  FooAreaOneRoute,\n]")
+  })
+
+  it("--check round-trips the nested emission", async () => {
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    const clean = makeCtx(["--routes", "--check"], tmp)
+    expect(await adminGenerateCommand(clean.ctx)).toBe(0)
+    expect(clean.stdout.join("")).toContain("is up to date")
+  })
+})
+
+describe("adminGenerateCommand --routes — built-in core entry", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "voyant-cli-admin-routes-core-"))
+    writeModuleFixture(tmp)
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  const modulePath = () => join(tmp, "src", "admin.routes.generated.tsx")
+
+  it("includes the core section when @voyantjs/admin-app exposes ./core-extension", async () => {
+    writeCorePackage(tmp)
+    const { ctx, stderr, stdout } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(stderr.join("")).not.toContain("built-in core entry skipped")
+
+    const content = readFileSync(modulePath(), "utf8")
+    expect(content).toContain(
+      `import { adminExtensionChildRoutes, adminExtensionRouteOptions } from "@voyantjs/admin-app"`,
+    )
+    expect(content).toContain(`const coreExtension = extension("core")`)
+    expect(content).toContain(
+      [
+        "export const CoreDashboardRoute = createRoute({",
+        "  getParentRoute: workspace,",
+        `  path: "/",`,
+        `  ...adminExtensionRouteOptions(coreExtension, "core-dashboard", runtime),`,
+        "})",
+      ].join("\n"),
+    )
+    // The settings subtree carries the core-specific comment and the full
+    // built-in exclude list.
+    expect(content).toContain(
+      [
+        "// Settings subtree: the static children above keep literal paths for typed",
+        "// links; app-supplied extra settings pages (factory `settings.extraPages`,",
+        "// invisible to the generator) bind at runtime via adminExtensionChildRoutes.",
+        "export const CoreSettingsRouteWithChildren = CoreSettingsRoute.addChildren([",
+      ].join("\n"),
+    )
+    expect(content).toContain(
+      `  ...adminExtensionChildRoutes(coreExtension, "core-settings", coreSettings, runtime, {`,
+    )
+    expect(content).toContain(`      "/product-tags",`)
+    expect(content).toContain(`  "/settings/product-tags": typeof CoreSettingsProductTagsRoute`)
+    expect(content).toContain(`  "/_workspace/settings/": typeof CoreSettingsIndexRoute`)
+    // Alphabetical section sort: core lands between the manifest sections.
+    expect(content.indexOf(`extension("core")`)).toBeGreaterThan(-1)
+    expect(content.indexOf(`extension("core")`)).toBeLessThan(content.indexOf(`extension("foo")`))
+    // 2 foo + core (3 top-level + 10 settings children) = 15.
+    expect(stdout.join("")).toContain("15 extension route(s) across 2 extension(s)")
+  })
+
+  it("skips the core entry when admin-app lacks the ./core-extension export", async () => {
+    writeCorePackage(tmp, false)
+    const { ctx, stderr } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(stderr.join("")).toContain("built-in core entry skipped")
+    const content = readFileSync(modulePath(), "utf8")
+    expect(content).not.toContain(`extension("core")`)
+    expect(content).toContain(`import { adminExtensionRouteOptions } from "@voyantjs/admin-app"`)
+  })
+
+  it("skips the core entry when admin-app is not resolvable at all", async () => {
+    const { ctx, stderr } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(stderr.join("")).toContain("built-in core entry skipped")
+    expect(readFileSync(modulePath(), "utf8")).not.toContain(`extension("core")`)
+  })
+
+  it("warns when the resolved core entry lacks the factory export", async () => {
+    writePackage(
+      tmp,
+      "@voyantjs/admin-app",
+      { exports: { "./core-extension": "./src/core-extension/index.tsx" } },
+      { "src/core-extension/index.tsx": `export function createSomethingElse() {}\n` },
+    )
+    const { ctx, stderr } = makeCtx(["--routes"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+    expect(stderr.join("")).toContain("does not export createAdminCoreExtension")
+    // Still emitted — the warning is best-effort, mirroring scanAdminEntries.
+    expect(readFileSync(modulePath(), "utf8")).toContain(`extension("core")`)
+  })
+})
+
+describe("adminGenerateCommand --routes --files — redirect/children skip (legacy)", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "voyant-cli-admin-files-skip-"))
+    writeFileSync(join(tmp, "voyant.config.ts"), `export default { modules: ["@voyantjs/foo"] }\n`)
+    writePackage(tmp, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
+    writePackage(
+      tmp,
+      "@voyantjs/foo-react",
+      { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
+      {
+        "src/admin/index.tsx": `
+export function createFooAdminExtension(options = {}) {
+  return {
+    id: "foo",
+    routes: [
+      { id: "foo-redirect", path: "/foo", title: "Foo", redirectTo: "/foo/items", component: FooHost },
+      {
+        id: "foo-area",
+        path: "/foo-area",
+        title: "Area",
+        component: AreaLayout,
+        children: [{ id: "foo-area-one", path: "/one", title: "One", component: One }],
+      },
+      { id: "foo-plain", path: "/foo-plain", title: "Plain", component: Plain },
+    ],
+  }
+}
+`,
+      },
+    )
+    // Core resolvable too — the legacy mode must ignore it entirely.
+    writeCorePackage(tmp)
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  it("skips redirect and children contributions even when they carry components", async () => {
+    const { ctx, stdout } = makeCtx(["--routes", "--files"], tmp)
+    expect(await adminGenerateCommand(ctx)).toBe(0)
+
+    const workspaceDir = join(tmp, "src", "routes", "_workspace")
+    expect(existsSync(join(workspaceDir, "foo-plain", "index.tsx"))).toBe(true)
+    expect(existsSync(join(workspaceDir, "foo"))).toBe(false)
+    expect(existsSync(join(workspaceDir, "foo-area"))).toBe(false)
+    // The built-in core entry never emits thin files.
+    expect(existsSync(join(workspaceDir, "settings"))).toBe(false)
+    expect(existsSync(join(workspaceDir, "account"))).toBe(false)
+    expect(stdout.join("")).toContain("1 written")
+    expect(stdout.join("")).toContain(
+      "2 redirect/children contribution(s) left to the code-assembled module",
+    )
+  })
+})
+
 describe("adminGenerateCommand --destinations (generated resolver map, RFC §4.7)", () => {
   let tmp: string
 

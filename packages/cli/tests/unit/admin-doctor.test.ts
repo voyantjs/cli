@@ -323,6 +323,132 @@ export function createFooAdminExtension(options = {}) {
   })
 })
 
+describe("Finding C — redirects, nested children, and the built-in core entry", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "voyant-cli-admin-doctor-nested-"))
+  })
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  const NESTED_FOO_SOURCE = `
+export function createFooAdminExtension(options = {}) {
+  const { basePath = "/foo" } = options
+  return {
+    id: "foo",
+    routes: [
+      { id: "foo-index", path: basePath, title: "Foo", redirectTo: \`\${basePath}/items\` },
+      { id: "foo-items", path: \`\${basePath}/items\`, title: "Items", page: () => import("./i.js") },
+      {
+        id: "foo-area",
+        path: "/foo-area",
+        title: "Area",
+        page: () => import("./area.js"),
+        children: [
+          { id: "foo-area-index", path: "/", title: "Area", redirectTo: "/foo-area/one" },
+          { id: "foo-area-one", path: "/one", title: "One", page: () => import("./one.js") },
+          ...(options.extraPages ?? []),
+        ],
+      },
+    ],
+  }
+}
+`
+
+  function writeNestedFixture(root: string) {
+    writeFileSync(join(root, "voyant.config.ts"), `export default { modules: ["@voyantjs/foo"] }\n`)
+    writePackage(root, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
+    writePackage(
+      root,
+      "@voyantjs/foo-react",
+      { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
+      { "src/admin/index.tsx": NESTED_FOO_SOURCE },
+    )
+  }
+
+  it("a module-bound redirect satisfies its path with no file and no page", async () => {
+    writeNestedFixture(tmp)
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+
+    const unbound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(unbound.ctx)).toBe(0)
+    expect(unbound.stdout.join("")).toContain("C: /foo (extension @voyantjs/foo-react/admin)")
+
+    // The code-assembled module (which emits redirects as plain routes)
+    // binds it — no file ever exists for /foo.
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    const bound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(bound.ctx)).toBe(0)
+    expect(bound.stdout.join("")).not.toContain("C: /foo")
+    expect(bound.stdout.join("")).toContain("0 finding(s)")
+  })
+
+  it("traverses children: absolute child paths must be bound; index and runtime children never report", async () => {
+    writeNestedFixture(tmp)
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+
+    const unbound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(unbound.ctx)).toBe(0)
+    const out = unbound.stdout.join("")
+    expect(out).toContain("C: /foo-area (extension @voyantjs/foo-react/admin)")
+    expect(out).toContain("C: /foo-area/one (extension @voyantjs/foo-react/admin)")
+    // Index children have no file-route spelling — never reported.
+    expect(out).not.toContain("C: /foo-area/ ")
+    // Runtime-bound children (the extraPages spread) are invisible to the scan.
+    expect(out).not.toContain("extraPages")
+
+    // The nested module binding (parent + getParentRoute children) satisfies
+    // the child paths via absolute-path reconstruction.
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    const bound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(bound.ctx)).toBe(0)
+    expect(bound.stdout.join("")).toContain("0 finding(s)")
+  })
+
+  it("includes the built-in core entry when resolvable and is clean after --routes", async () => {
+    writeNestedFixture(tmp)
+    writePackage(
+      tmp,
+      "@voyantjs/admin-app",
+      { exports: { ".": "./src/index.ts", "./core-extension": "./src/core-extension/index.tsx" } },
+      { "src/core-extension/index.tsx": `export function createAdminCoreExtension() {}\n` },
+    )
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+
+    const unbound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(unbound.ctx)).toBe(0)
+    const out = unbound.stdout.join("")
+    expect(out).toContain("C: /account (extension @voyantjs/admin-app/core-extension)")
+    expect(out).toContain("C: /settings (extension @voyantjs/admin-app/core-extension)")
+    expect(out).toContain("C: /settings/team (extension @voyantjs/admin-app/core-extension)")
+    // The root path stays host-owned; index children never report.
+    expect(out).not.toContain("C: / (")
+    expect(out).not.toContain("C: /settings/ ")
+
+    expect(await adminGenerateCommand(makeCtx(["--routes"], tmp).ctx)).toBe(0)
+    const bound = makeCtx([], tmp)
+    expect(await adminDoctorCommand(bound.ctx)).toBe(0)
+    expect(bound.stdout.join("")).toContain("0 finding(s)")
+  })
+
+  it("skips the core entry when admin-app lacks the ./core-extension export", async () => {
+    writeNestedFixture(tmp)
+    writePackage(tmp, "@voyantjs/admin-app", { exports: { ".": "./src/index.ts" } })
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    expect(stdout.join("")).not.toContain("@voyantjs/admin-app/core-extension")
+  })
+})
+
 describe("Finding D — generated-resolver gate (RFC §4.7 endgame)", () => {
   let tmp: string
 
