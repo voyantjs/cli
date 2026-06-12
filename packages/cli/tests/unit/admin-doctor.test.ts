@@ -49,7 +49,7 @@ function writeFixture(root: string) {
   writePackage(root, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
   writePackage(
     root,
-    "@voyantjs/foo-ui",
+    "@voyantjs/foo-react",
     { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
     { "src/admin/index.tsx": FOO_ADMIN_SOURCE },
   )
@@ -80,7 +80,7 @@ describe("adminDoctorCommand", () => {
     expect(code).toBe(0)
     const out = stdout.join("")
     expect(out).toContain("[admin-doctor] A: generated file")
-    expect(out).toContain("@voyantjs/foo-ui/admin")
+    expect(out).toContain("@voyantjs/foo-react/admin")
   })
 
   it("reports Finding A when an admin entry is not imported", async () => {
@@ -94,7 +94,7 @@ describe("adminDoctorCommand", () => {
     const code = await adminDoctorCommand(ctx)
     expect(code).toBe(0)
     expect(stdout.join("")).toContain(
-      "A: admin entry @voyantjs/foo-ui/admin (module @voyantjs/foo) is not imported",
+      "A: admin entry @voyantjs/foo-react/admin (module @voyantjs/foo) is not imported",
     )
   })
 
@@ -104,8 +104,8 @@ describe("adminDoctorCommand", () => {
     writeFileSync(
       join(tmp, "src", "admin.extensions.generated.ts"),
       [
-        `import { createFooAdminExtension } from "@voyantjs/foo-ui/admin"`,
-        `import { createGoneAdminExtension } from "@voyantjs/gone-ui/admin"`,
+        `import { createFooAdminExtension } from "@voyantjs/foo-react/admin"`,
+        `import { createGoneAdminExtension } from "@voyantjs/gone-react/admin"`,
         `export const generatedAdminExtensionFactories = {`,
         `  foo: createFooAdminExtension,`,
         `  gone: createGoneAdminExtension,`,
@@ -117,16 +117,16 @@ describe("adminDoctorCommand", () => {
     const code = await adminDoctorCommand(ctx)
     expect(code).toBe(0)
     const out = stdout.join("")
-    expect(out).toContain("B: @voyantjs/gone-ui/admin is imported")
-    expect(out).not.toContain("B: @voyantjs/foo-ui/admin")
+    expect(out).toContain("B: @voyantjs/gone-react/admin is imported")
+    expect(out).not.toContain("B: @voyantjs/foo-react/admin")
     // foo is imported, so no Finding A for it either.
-    expect(out).not.toContain("A: admin entry @voyantjs/foo-ui/admin")
+    expect(out).not.toContain("A: admin entry @voyantjs/foo-react/admin")
   })
 
   it("does not report Finding B when only the module's UI package is missing", async () => {
     writeFixture(tmp)
     // @voyantjs/bar stays in the manifest (module package present) but has
-    // no resolvable bar-ui package — a stale generated import for it is a
+    // no resolvable bar-react package — a stale generated import for it is a
     // regenerate-needed situation, NOT "module left the manifest".
     writeFileSync(
       join(tmp, "voyant.config.ts"),
@@ -137,8 +137,8 @@ describe("adminDoctorCommand", () => {
     writeFileSync(
       join(tmp, "src", "admin.extensions.generated.ts"),
       [
-        `import { createFooAdminExtension } from "@voyantjs/foo-ui/admin"`,
-        `import { createBarAdminExtension } from "@voyantjs/bar-ui/admin"`,
+        `import { createFooAdminExtension } from "@voyantjs/foo-react/admin"`,
+        `import { createBarAdminExtension } from "@voyantjs/bar-react/admin"`,
         `export const generatedAdminExtensionFactories = {`,
         `  foo: createFooAdminExtension,`,
         `  bar: createBarAdminExtension,`,
@@ -149,10 +149,10 @@ describe("adminDoctorCommand", () => {
     const { ctx, stdout } = makeCtx([], tmp)
     const code = await adminDoctorCommand(ctx)
     expect(code).toBe(0)
-    expect(stdout.join("")).not.toContain("B: @voyantjs/bar-ui/admin")
+    expect(stdout.join("")).not.toContain("B: @voyantjs/bar-react/admin")
   })
 
-  it("reports Finding C when no route file matches a declared path", async () => {
+  it("reports Finding C when neither a route file nor a module entry binds a path", async () => {
     writeFixture(tmp)
     await adminGenerateCommand(makeCtx([], tmp).ctx)
     mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
@@ -160,14 +160,50 @@ describe("adminDoctorCommand", () => {
     const missing = makeCtx([], tmp)
     expect(await adminDoctorCommand(missing.ctx)).toBe(0)
     expect(missing.stdout.join("")).toContain(
-      "C: no route file found for /foo (extension @voyantjs/foo-ui/admin)",
+      "C: /foo (extension @voyantjs/foo-react/admin) is bound by no route file and " +
+        "no entry in src/admin.routes.generated.tsx",
     )
 
     mkdirSync(join(tmp, "src", "routes", "_workspace", "foo"), { recursive: true })
     writeFileSync(join(tmp, "src", "routes", "_workspace", "foo", "index.tsx"), "export {}\n")
     const present = makeCtx([], tmp)
     expect(await adminDoctorCommand(present.ctx)).toBe(0)
-    expect(present.stdout.join("")).not.toContain("C: no route file found")
+    expect(present.stdout.join("")).not.toContain("C: /foo")
+  })
+
+  it("Finding C is satisfied by an entry in the code-assembled module (fileless routes)", async () => {
+    writeFixture(tmp)
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    // No route file anywhere — only the RFC §4.8 code-assembled module binds /foo.
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+    writeFileSync(
+      join(tmp, "src", "admin.routes.generated.tsx"),
+      [
+        `// GENERATED by voyant admin generate --routes — do not edit.`,
+        `export const FooIndexRoute = createRoute({`,
+        `  getParentRoute: workspace,`,
+        `  path: "/foo",`,
+        `  ...adminExtensionRouteOptions(fooExtension, "foo-index", runtime),`,
+        `})`,
+        ``,
+      ].join("\n"),
+    )
+    const { ctx, stdout } = makeCtx([], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    const out = stdout.join("")
+    expect(out).not.toContain("C: /foo")
+    expect(out).toContain("0 finding(s)")
+  })
+
+  it("honors --routes-out for a non-default module path", async () => {
+    writeFixture(tmp)
+    await adminGenerateCommand(makeCtx([], tmp).ctx)
+    mkdirSync(join(tmp, "src", "routes", "_workspace"), { recursive: true })
+    const custom = join(tmp, "src", "admin-routes.custom.tsx")
+    writeFileSync(custom, `const r = { path: "/foo" }\n`)
+    const { ctx, stdout } = makeCtx(["--routes-out", custom], tmp)
+    expect(await adminDoctorCommand(ctx)).toBe(0)
+    expect(stdout.join("")).not.toContain("C: /foo")
   })
 
   it("is clean after voyant admin generate (and always exits 0)", async () => {
@@ -179,7 +215,10 @@ describe("adminDoctorCommand", () => {
     const out = stdout.join("")
     expect(out).not.toContain(" A: ")
     expect(out).not.toContain(" B: ")
-    expect(out).toContain("C: skipped route parity — no src/routes directory")
+    expect(out).toContain(
+      "C: skipped route parity — no src/routes/_workspace directory and no " +
+        "src/admin.routes.generated.tsx in host",
+    )
     expect(out).toContain("D: skipped destination parity — no src/lib/admin-destinations.ts")
     expect(out).toContain("0 finding(s)")
   })
@@ -206,7 +245,7 @@ export function createFooAdminExtension(options = {}) {
       writePackage(root, "@voyantjs/foo", { exports: { ".": "./src/index.ts" } })
       writePackage(
         root,
-        "@voyantjs/foo-ui",
+        "@voyantjs/foo-react",
         { exports: { ".": "./src/index.ts", "./admin": "./src/admin/index.tsx" } },
         { "src/admin/index.tsx": DESTINATION_FOO_SOURCE },
       )
@@ -230,7 +269,7 @@ export function createFooAdminExtension(options = {}) {
       expect(await adminDoctorCommand(ctx)).toBe(0)
       const out = stdout.join("")
       expect(out).toContain(
-        `D: destination "foo.detail" declared by @voyantjs/foo-ui/admin has no resolver`,
+        `D: destination "foo.detail" declared by @voyantjs/foo-react/admin has no resolver`,
       )
       expect(out).not.toContain(`D: destination "foo.list"`)
     })

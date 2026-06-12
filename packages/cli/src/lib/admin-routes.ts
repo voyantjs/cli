@@ -7,7 +7,7 @@ import { join } from "node:path"
  * Everything here is pure source-text scanning — no admin entry is ever
  * imported or executed. The scanners are deliberately convention-bound: they
  * understand the `defineAdminExtension({ routes: [...] })` shape and the
- * `declare module "@voyantjs/admin"` destination declarations the `*-ui`
+ * `declare module "@voyantjs/admin"` destination declarations the `*-react`
  * packages actually write, resolving option-destructuring string defaults
  * (`const { path = "/promotions" } = options`) and template-literal paths
  * (`` `${basePath}/contracts` ``) against those defaults.
@@ -30,12 +30,21 @@ export interface ScannedRouteContribution {
   /** Raw text of the path value (for skip reporting when unresolvable). */
   rawPath: string | null
   hasComponent: boolean
+  /** A lazy `page:` module loader is present (packaged-admin RFC §4.8). */
+  hasPage: boolean
   hasLoader: boolean
   hasValidateSearch: boolean
+  /** Raw text of the `validateSearch:` value, for schema-identifier resolution. */
+  validateSearchRaw: string | null
   /** `ssr:` literal when statically present (`true`/`false`/`"data-only"`). */
   ssr: boolean | "data-only" | null
   /** `preload:` literal when statically present (`false` or a policy string). */
   preload: string | false | null
+}
+
+/** Does the contribution carry an implementation (`page` or `component`)? */
+export function isImplementedContribution(contribution: ScannedRouteContribution): boolean {
+  return contribution.hasPage || contribution.hasComponent
 }
 
 /** Runtime-import bindings for generated route files. */
@@ -99,6 +108,21 @@ function skipTemplate(source: string, start: number): number {
     i++
   }
   return source.length
+}
+
+/** Drop leading line/block comments (and surrounding whitespace) from `text`. */
+function stripLeadingComments(text: string): string {
+  let i = 0
+  while (i < text.length) {
+    if (/\s/.test(text[i] as string)) {
+      i++
+      continue
+    }
+    const skipped = skipComment(text, i)
+    if (skipped === i) break
+    i = skipped
+  }
+  return text.slice(i)
 }
 
 /** Index just past a comment starting at `start`, or `start` when not a comment. */
@@ -287,14 +311,47 @@ function resolvePathValue(raw: string, defaults: Map<string, string>): string | 
 }
 
 /**
+ * Index of the `[` opening the first `routes: [...]` array that sits in CODE
+ * (not in a comment, string, or template literal), or -1. Doc comments above
+ * §4.8 admin entries routinely *mention* `routes: [...]`, so a bare regex
+ * over the source would anchor on prose instead of the contribution array.
+ */
+function findRoutesArrayOpen(source: string): number {
+  let i = 0
+  while (i < source.length) {
+    const ch = source[i]
+    if (ch === '"' || ch === "'") {
+      i = skipQuoted(source, i)
+      continue
+    }
+    if (ch === "`") {
+      i = skipTemplate(source, i)
+      continue
+    }
+    if (ch === "/") {
+      const skipped = skipComment(source, i)
+      if (skipped !== i) {
+        i = skipped
+        continue
+      }
+    }
+    if (ch === "r" && !/[\w$]/.test(source[i - 1] ?? " ")) {
+      const match = /^routes\s*:\s*\[/.exec(source.slice(i))
+      if (match) return i + match[0].length - 1
+    }
+    i++
+  }
+  return -1
+}
+
+/**
  * Statically extract the route contributions declared in an admin entry
  * source: the objects of the first top-level `routes: [...]` array. Returns
  * an empty array when no routes array is found.
  */
 export function scanRouteContributions(source: string): ScannedRouteContribution[] {
-  const arrayMatch = /\broutes\s*:\s*\[/.exec(source)
-  if (!arrayMatch) return []
-  const openBracket = arrayMatch.index + arrayMatch[0].length - 1
+  const openBracket = findRoutesArrayOpen(source)
+  if (openBracket === -1) return []
   const closeBracket = findMatching(source, openBracket)
   if (closeBracket === -1) return []
   const arrayBody = source.slice(openBracket + 1, closeBracket)
@@ -340,13 +397,18 @@ function parseContribution(
     path: null,
     rawPath: null,
     hasComponent: false,
+    hasPage: false,
     hasLoader: false,
     hasValidateSearch: false,
+    validateSearchRaw: null,
     ssr: null,
     preload: null,
   }
 
-  for (const entry of splitTopLevel(objectBody)) {
+  for (const rawEntry of splitTopLevel(objectBody)) {
+    // Doc comments ride along with the property they precede — drop them so
+    // a commented `page:`/`loader:` still key-matches.
+    const entry = stripLeadingComments(rawEntry)
     const keyMatch = /^([A-Za-z_$][\w$]*)\s*(:)?/.exec(entry)
     if (!keyMatch) continue
     const key = keyMatch[1]
@@ -367,11 +429,15 @@ function parseContribution(
       case "component":
         contribution.hasComponent = true
         break
+      case "page":
+        contribution.hasPage = true
+        break
       case "loader":
         contribution.hasLoader = true
         break
       case "validateSearch":
         contribution.hasValidateSearch = true
+        contribution.validateSearchRaw = value
         break
       case "ssr": {
         if (value === "true") contribution.ssr = true
@@ -458,6 +524,179 @@ export function scanResolverMapKeys(source: string): string[] | null {
 }
 
 // ---------------------------------------------------------------------------
+// Extension-id + search-schema scanning (code-assembled module, RFC §4.8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `id:` string literal of the first `defineAdminExtension({ ... })`
+ * object in an admin entry source, or null when not statically resolvable.
+ * The generated module resolves extensions from the host registry by this id.
+ */
+export function scanExtensionId(source: string): string | null {
+  const callMatch = /\bdefineAdminExtension\s*\(/.exec(source)
+  if (!callMatch) return null
+  const open = source.indexOf("{", callMatch.index + callMatch[0].length - 1)
+  if (open === -1) return null
+  const close = findMatching(source, open)
+  if (close === -1) return null
+  for (const entry of splitTopLevel(source.slice(open + 1, close))) {
+    const match = /^id\s*:\s*([\s\S]+)$/.exec(entry)
+    if (match?.[1] !== undefined) return stringLiteralValue(match[1])
+  }
+  return null
+}
+
+/** Is `ident` a named export of the entry source (direct or brace re-export)? */
+export function isExportedIdent(source: string, ident: string): boolean {
+  if (new RegExp(`\\bexport\\s+(?:const|let|var|function|class)\\s+${ident}\\b`).test(source)) {
+    return true
+  }
+  const bracePattern = /\bexport\s*(?:type\s*)?\{([^}]*)\}/g
+  let match: RegExpExecArray | null = bracePattern.exec(source)
+  while (match !== null) {
+    const body = match[1] ?? ""
+    for (const part of body.split(",")) {
+      const entry = part.trim()
+      if (entry.length === 0 || entry.startsWith("type ")) continue
+      const asMatch = /\bas\s+([A-Za-z_$][\w$]*)$/.exec(entry)
+      const exported = asMatch?.[1] ?? entry
+      if (exported === ident) return true
+    }
+    match = bracePattern.exec(source)
+  }
+  return false
+}
+
+function extractParseIdent(text: string): string | null {
+  return /([A-Za-z_$][\w$]*)\.parse\s*\(/.exec(text)?.[1] ?? null
+}
+
+/**
+ * Resolve a contribution's `validateSearch:` raw value to the EXPORTED search
+ * schema identifier the generated module imports for typed links — the
+ * `validateSearch: bookingsIndexSearchSchema` literal in the emitted
+ * `createRoute` options. Handles the shapes §4.8 admin entries write:
+ *
+ * - `validateSearch: (search) => someSchema.parse(search)` → `someSchema`
+ * - `validateSearch: someSchema` (exported directly) → `someSchema`
+ * - `validateSearch: localHelper` where the entry defines
+ *   `const localHelper = (search) => someSchema.parse(search)` → `someSchema`
+ *
+ * Returns null when no identifier resolves or the schema is not exported
+ * from the entry (the module cannot import it).
+ */
+export function resolveSearchSchemaIdent(raw: string, source: string): string | null {
+  const text = raw.trim()
+  let ident = extractParseIdent(text)
+  if (ident === null && /^[A-Za-z_$][\w$]*$/.test(text)) {
+    if (isExportedIdent(source, text)) {
+      ident = text
+    } else {
+      // Follow one local alias: `const helper = (s) => schema.parse(s)`.
+      const defMatch = new RegExp(`(?:const|let|var)\\s+${text}\\s*(?::[^=\\n]*)?=`).exec(source)
+      if (defMatch) {
+        const defStart = defMatch.index + defMatch[0].length
+        ident = extractParseIdent(source.slice(defStart, defStart + 400))
+      }
+    }
+  }
+  return ident !== null && isExportedIdent(source, ident) ? ident : null
+}
+
+// ---------------------------------------------------------------------------
+// Generated-module scanning (doctor Finding C)
+// ---------------------------------------------------------------------------
+
+/** Default code-assembled admin route module, relative to the config dir. */
+export const DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH = "src/admin.routes.generated.tsx"
+
+/**
+ * The route-path literals of a code-assembled admin route module — the
+ * `path: "..."` options of its `createRoute` calls. Static text scan; in the
+ * generated module every `path:` literal is a route path, so a contribution
+ * path appearing here is bound without any route file existing for it.
+ */
+export function scanGeneratedModuleRoutePaths(source: string): string[] {
+  const paths = new Set<string>()
+  const pattern = /\bpath\s*:\s*["']([^"']+)["']/g
+  let match: RegExpExecArray | null = pattern.exec(source)
+  while (match !== null) {
+    if (match[1] !== undefined) paths.add(match[1])
+    match = pattern.exec(source)
+  }
+  return [...paths]
+}
+
+// ---------------------------------------------------------------------------
+// Manifest `admin.routes` config
+// ---------------------------------------------------------------------------
+
+/** Import bindings of the code-assembled module (runtime + host registry). */
+export interface AdminRoutesModuleImports extends AdminRouteRuntimeImports {
+  /** Module exporting the host's admin extension registry. */
+  registryModule: string
+  /** Named export of {@link registryModule} (the registered extensions array). */
+  registryExport: string
+}
+
+/** Operator-convention defaults for {@link AdminRoutesModuleImports}. */
+export const DEFAULT_ROUTES_MODULE_IMPORTS: AdminRoutesModuleImports = {
+  ...DEFAULT_ROUTE_RUNTIME_IMPORTS,
+  registryModule: "@/lib/admin-extensions",
+  registryExport: "adminExtensions",
+}
+
+/** The manifest's `admin.routes` block, resolved against operator defaults. */
+export interface AdminRoutesManifestConfig {
+  /** Host route-tree directory (relative to the config dir), when configured. */
+  dir?: string
+  /** Code-assembled module path (relative to the config dir), when configured. */
+  out?: string
+  /** Workspace layout route module, when configured (else derived from `dir`). */
+  workspaceRouteModule?: string
+  imports: AdminRoutesModuleImports
+}
+
+/**
+ * Read the manifest's `admin.routes` block structurally (older core types
+ * lack it) and fill the operator-convention defaults for import bindings.
+ */
+export function resolveAdminRoutesManifestConfig(config: unknown): AdminRoutesManifestConfig {
+  const routes = (
+    config as {
+      admin?: {
+        routes?: {
+          dir?: string
+          out?: string
+          workspaceRouteModule?: string
+          apiUrlModule?: string
+          apiUrlExport?: string
+          fetcherModule?: string
+          fetcherExport?: string
+          registryModule?: string
+          registryExport?: string
+        }
+      }
+    }
+  ).admin?.routes
+  const str = (value: unknown): string | undefined =>
+    typeof value === "string" && value.length > 0 ? value : undefined
+  return {
+    dir: str(routes?.dir),
+    out: str(routes?.out),
+    workspaceRouteModule: str(routes?.workspaceRouteModule),
+    imports: {
+      apiUrlModule: str(routes?.apiUrlModule) ?? DEFAULT_ROUTES_MODULE_IMPORTS.apiUrlModule,
+      apiUrlExport: str(routes?.apiUrlExport) ?? DEFAULT_ROUTES_MODULE_IMPORTS.apiUrlExport,
+      fetcherModule: str(routes?.fetcherModule) ?? DEFAULT_ROUTES_MODULE_IMPORTS.fetcherModule,
+      fetcherExport: str(routes?.fetcherExport) ?? DEFAULT_ROUTES_MODULE_IMPORTS.fetcherExport,
+      registryModule: str(routes?.registryModule) ?? DEFAULT_ROUTES_MODULE_IMPORTS.registryModule,
+      registryExport: str(routes?.registryExport) ?? DEFAULT_ROUTES_MODULE_IMPORTS.registryExport,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route-file paths + rendering
 // ---------------------------------------------------------------------------
 
@@ -502,7 +741,7 @@ export function alternativeRouteFileRelPaths(routePath: string): string[] {
 export interface RenderRouteFileOptions {
   /** createFileRoute id, e.g. `/_workspace/promotions/`. */
   fileRouteId: string
-  /** Admin entry import specifier, e.g. `@voyantjs/promotions-ui/admin`. */
+  /** Admin entry import specifier, e.g. `@voyantjs/promotions-react/admin`. */
   importSpec: string
   /** Extension factory export, e.g. `createPromotionsAdminExtension`. */
   exportName: string
@@ -577,4 +816,234 @@ export function renderRouteFile(options: RenderRouteFileOptions): string {
     `})`,
     ``,
   ].join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Code-assembled module rendering (packaged-admin RFC §4.8)
+// ---------------------------------------------------------------------------
+
+const MAX_LINE_WIDTH = 100
+const SECTION_RULE = `// ${"-".repeat(75)}`
+
+/**
+ * The route-id prefix the host's routes dir contributes to TanStack route
+ * ids: the dir's segments after `routes` (e.g. `src/routes/_workspace` →
+ * `/_workspace`). The generated module's `AdminExtensionRoutesById` keys are
+ * this prefix plus the route path.
+ */
+export function routeIdPrefixFor(routesDirRel: string): string {
+  const segments = routesDirRel.split(/[\\/]/).filter(Boolean)
+  const routesIndex = segments.lastIndexOf("routes")
+  const prefixSegments = routesIndex === -1 ? [] : segments.slice(routesIndex + 1)
+  return prefixSegments.length > 0 ? `/${prefixSegments.join("/")}` : ""
+}
+
+/**
+ * Derive the workspace layout route module from the routes dir, following
+ * the operator's `@/` → `src/` alias convention: `src/routes/_workspace` →
+ * `@/routes/_workspace/route`. Override via `admin.routes.workspaceRouteModule`
+ * when the host aliases differently.
+ */
+export function workspaceRouteModuleFor(routesDirRel: string): string {
+  const normalized = routesDirRel.replace(/[\\/]+$/, "").replaceAll("\\", "/")
+  const aliased = normalized.startsWith("src/") ? normalized.slice("src/".length) : normalized
+  return `@/${aliased}/route`
+}
+
+/** One `createRoute` entry of the code-assembled module. */
+export interface AdminRoutesModuleRoute {
+  /** Exported route const, e.g. `PromotionsIndexRoute`. */
+  constName: string
+  /** Contribution id resolved through the registry, e.g. `promotions-index`. */
+  routeId: string
+  /** Literal route path under the workspace layout, e.g. `/promotions`. */
+  path: string
+  /** Exported search-schema identifier for `validateSearch:`, when resolved. */
+  searchSchemaIdent: string | null
+}
+
+/** One extension's block of the code-assembled module. */
+export interface AdminRoutesModuleSection {
+  /** Registry id resolved via `extension("<id>")`. */
+  extensionId: string
+  /** Admin entry import specifier — the source of any search-schema imports. */
+  importSpec: string
+  routes: ReadonlyArray<AdminRoutesModuleRoute>
+}
+
+export interface RenderAdminRoutesModuleOptions {
+  /** Output file base name (for the error-message tag), e.g. `admin.routes.generated`. */
+  moduleBaseName: string
+  /** Extension sections, pre-sorted by extension id. */
+  sections: ReadonlyArray<AdminRoutesModuleSection>
+  imports: AdminRoutesModuleImports
+  /** Workspace layout route module, e.g. `@/routes/_workspace/route`. */
+  workspaceRouteModule: string
+  /** Route-id prefix of the workspace layout, e.g. `/_workspace`. */
+  routeIdPrefix: string
+}
+
+/** `@/lib/admin-extensions` → `src/lib/admin-extensions.tsx` (header prose). */
+function registryDisplayPath(registryModule: string): string {
+  return registryModule.startsWith("@/") ? `src/${registryModule.slice(2)}.tsx` : registryModule
+}
+
+/** Named-import line(s), wrapped beyond the formatter's line width. */
+function formatNamedImport(names: ReadonlyArray<string>, spec: string): string[] {
+  const single = `import { ${names.join(", ")} } from "${spec}"`
+  if (single.length <= MAX_LINE_WIDTH) return [single]
+  return ["import {", ...names.map((name) => `  ${name},`), `} from "${spec}"`]
+}
+
+/** The `...adminExtensionRouteOptions(...)` spread, wrapped beyond line width. */
+function formatRouteOptionsSpread(extensionConst: string, routeId: string): string[] {
+  const single = `  ...adminExtensionRouteOptions(${extensionConst}, "${routeId}", runtime),`
+  if (single.length <= MAX_LINE_WIDTH) return [single]
+  return [
+    "  ...adminExtensionRouteOptions(",
+    `    ${extensionConst},`,
+    `    "${routeId}",`,
+    "    runtime,",
+    "  ),",
+  ]
+}
+
+/**
+ * Render the code-assembled admin route module (packaged-admin RFC §4.8):
+ * one `createRoute` per extension route contribution, options resolved from
+ * the host-registered extension instances via `adminExtensionRouteOptions`,
+ * plus the three typed-link map interfaces the host's `router.tsx` merges
+ * into its file-route types. Deterministic output — `--check` stays a pure
+ * string comparison.
+ */
+export function renderAdminRoutesModule(options: RenderAdminRoutesModuleOptions): string {
+  const { moduleBaseName, sections, imports, workspaceRouteModule, routeIdPrefix } = options
+
+  // Search-schema imports grouped by admin entry, both levels sorted.
+  const schemaImportsBySpec = new Map<string, Set<string>>()
+  for (const section of sections) {
+    for (const route of section.routes) {
+      if (route.searchSchemaIdent === null) continue
+      const idents = schemaImportsBySpec.get(section.importSpec) ?? new Set<string>()
+      idents.add(route.searchSchemaIdent)
+      schemaImportsBySpec.set(section.importSpec, idents)
+    }
+  }
+  const schemaImportLines = [...schemaImportsBySpec.keys()]
+    .sort()
+    .flatMap((spec) =>
+      formatNamedImport([...(schemaImportsBySpec.get(spec) as Set<string>)].sort(), spec),
+    )
+
+  const appImports: Array<{ spec: string; names: string[] }> = [
+    { spec: imports.registryModule, names: [imports.registryExport] },
+    { spec: imports.apiUrlModule, names: [imports.apiUrlExport] },
+    { spec: imports.fetcherModule, names: [imports.fetcherExport] },
+    { spec: workspaceRouteModule, names: ["Route as WorkspaceRoute"] },
+  ]
+  const appImportLines = appImports
+    .sort((a, b) => (a.spec < b.spec ? -1 : a.spec > b.spec ? 1 : 0))
+    .flatMap((entry) => formatNamedImport(entry.names, entry.spec))
+
+  const lines: string[] = [
+    `${GENERATED_ROUTE_HEADER} — do not edit.`,
+    "// Code-assembled admin route tree for package-delivered pages (packaged-admin",
+    "// RFC §4.8 endgame): every extension route contribution becomes a code-based",
+    "// route grafted under the workspace layout — NO per-route files exist for",
+    "// package-delivered pages. Path literals + typed search contracts stay in",
+    "// this module (they are what gives the host typed links via the",
+    "// `AdminExtensionRoutesBy*` interfaces merged in `router.tsx`); pages,",
+    "// loaders, SSR modes, and boundaries come from the extension contributions",
+    `// (resolved from the host-owned registry in \`${registryDisplayPath(imports.registryModule)}\`,`,
+    "// so app-supplied factory options apply to the assembled routes).",
+    "// To eject a route, remove it here (and from the maps below) and add a",
+    "// hand-written route file — the generator skips files without this header.",
+    `import { createRoute } from "@tanstack/react-router"`,
+    `import { adminExtensionRouteOptions } from "@voyantjs/admin-app"`,
+    ...schemaImportLines,
+    "",
+    ...appImportLines,
+    "",
+    `// ${imports.fetcherExport} so SSR loaders forward the request cookie; resolved per`,
+    `// loader call because \`${imports.apiUrlExport}()\` reads the runtime origin.`,
+    `const runtime = () => ({ baseUrl: ${imports.apiUrlExport}(), fetcher: ${imports.fetcherExport} })`,
+    "",
+    "const workspace = () => WorkspaceRoute",
+    "",
+    "function extension(id: string) {",
+    `  const match = ${imports.registryExport}.find((candidate) => candidate.id === id)`,
+    "  if (!match) {",
+    // The emitted line nests a template literal — hence the escapes.
+    `    throw new Error(\`[${moduleBaseName}] No registered admin extension "\${id}".\`)`,
+    "  }",
+    "  return match",
+    "}",
+  ]
+
+  for (const section of sections) {
+    const extensionConst = `${toCamelIdent(section.extensionId)}Extension`
+    lines.push(
+      "",
+      SECTION_RULE,
+      `// ${section.extensionId}`,
+      SECTION_RULE,
+      "",
+      `const ${extensionConst} = extension("${section.extensionId}")`,
+    )
+    for (const route of section.routes) {
+      lines.push(
+        "",
+        `export const ${route.constName} = createRoute({`,
+        "  getParentRoute: workspace,",
+        `  path: "${route.path}",`,
+      )
+      if (route.searchSchemaIdent !== null) {
+        lines.push(`  validateSearch: ${route.searchSchemaIdent},`)
+      }
+      lines.push(...formatRouteOptionsSpread(extensionConst, route.routeId), "})")
+    }
+  }
+
+  const allRoutes = sections.flatMap((section) => section.routes)
+  lines.push(
+    "",
+    SECTION_RULE,
+    "// tree + typed-link maps",
+    SECTION_RULE,
+    "",
+    "export const adminExtensionRoutes = [",
+    ...allRoutes.map((route) => `  ${route.constName},`),
+    "]",
+  )
+  for (const [interfaceName, keyFor] of [
+    ["AdminExtensionRoutesByFullPath", (route: AdminRoutesModuleRoute) => route.path],
+    ["AdminExtensionRoutesByTo", (route: AdminRoutesModuleRoute) => route.path],
+    [
+      "AdminExtensionRoutesById",
+      (route: AdminRoutesModuleRoute) => `${routeIdPrefix}${route.path}`,
+    ],
+  ] as const) {
+    lines.push(
+      "",
+      `export interface ${interfaceName} {`,
+      ...allRoutes.map((route) => `  "${keyFor(route)}": typeof ${route.constName}`),
+      "}",
+    )
+  }
+
+  return `${lines.join("\n")}\n`
+}
+
+/** Camel-case an extension id for its module-local const (`crm` → `crm`). */
+function toCamelIdent(id: string): string {
+  const parts = id.split(/[^A-Za-z0-9]+/).filter(Boolean)
+  if (parts.length === 0) return "ext"
+  return (
+    (parts[0] as string).charAt(0).toLowerCase() +
+    (parts[0] as string).slice(1) +
+    parts
+      .slice(1)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join("")
+  )
 }

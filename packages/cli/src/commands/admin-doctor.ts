@@ -8,7 +8,15 @@ import {
   DEFAULT_GENERATED_RELATIVE_PATH,
   scanAdminEntries,
 } from "../lib/admin-entries.js"
-import { scanDeclaredDestinationKeys, scanResolverMapKeys } from "../lib/admin-routes.js"
+import {
+  DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH,
+  DEFAULT_ROUTES_DIR,
+  resolveAdminRoutesManifestConfig,
+  scanDeclaredDestinationKeys,
+  scanGeneratedModuleRoutePaths,
+  scanResolverMapKeys,
+  scanRouteContributions,
+} from "../lib/admin-routes.js"
 import { getStringFlag, parseArgs } from "../lib/args.js"
 import { loadVoyantConfigFile, resolveConfigPath } from "../lib/config-loader.js"
 import type { CommandContext, CommandResult } from "../types.js"
@@ -17,7 +25,8 @@ import type { CommandContext, CommandResult } from "../types.js"
 export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts"
 
 /**
- * `voyant admin doctor [--config <path>] [--out <file>] [--destinations <file>]`
+ * `voyant admin doctor [--config <path>] [--out <file>] [--destinations <file>]
+ * [--routes-dir <dir>] [--routes-out <file>]`
  *
  * Report-only parity check for the manifest ↔ admin extension ↔ route chain
  * (packaged-admin RFC §4.1). Always exits 0 in this pass; CI can grep the
@@ -27,9 +36,14 @@ export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts
  *   generated composition file (or the file is missing entirely).
  * - **B** — the generated file imports an admin entry whose module is no
  *   longer in the manifest.
- * - **C** — best-effort route parity: `path: "..."` literals declared in an
- *   admin entry's source have no plausible route file under
- *   `src/routes/_workspace/**`. Static scan only — nothing is imported.
+ * - **C** — best-effort route parity: a route contribution's statically
+ *   resolvable path is bound NEITHER by a route file under the host's routes
+ *   dir (default `src/routes/_workspace`, override with `--routes-dir` or
+ *   the manifest's `admin.routes.dir`) NOR by an entry in the host's
+ *   code-assembled admin route module (default
+ *   `src/admin.routes.generated.tsx`, override with `--routes-out` or the
+ *   manifest's `admin.routes.out` — see packaged-admin RFC §4.8). Static
+ *   scan only — nothing is imported.
  * - **D** — destination parity (RFC §4.7): `AdminDestinations` keys the
  *   mounted admin entries declare via `declare module "@voyantjs/admin"`
  *   versus the keys of the host's resolver map (the object literal marked
@@ -111,16 +125,40 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
     }
   }
 
-  // Finding C: best-effort route parity against file-based routing.
-  const workspaceRoutesDir = join(configDir, "src", "routes", "_workspace")
-  if (!existsSync(join(configDir, "src", "routes"))) {
-    ctx.stdout(`[admin-doctor] C: skipped route parity — no src/routes directory in host\n`)
+  // Finding C: best-effort route parity. A contribution path is bound either
+  // by a route file (file-based routing) or by an entry in the host's
+  // code-assembled admin route module (RFC §4.8 — fileless routes).
+  const routesConfig = resolveAdminRoutesManifestConfig(config)
+  const routesDirRel = getStringFlag(args, "routes-dir") ?? routesConfig.dir ?? DEFAULT_ROUTES_DIR
+  const routesDir = isAbsolute(routesDirRel) ? routesDirRel : join(configDir, routesDirRel)
+  const routesOutFlag = getStringFlag(args, "routes-out")
+  const routesModulePath = routesOutFlag
+    ? isAbsolute(routesOutFlag)
+      ? routesOutFlag
+      : resolve(ctx.cwd, routesOutFlag)
+    : join(configDir, routesConfig.out ?? DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH)
+  const printableRoutesModule = relative(ctx.cwd, routesModulePath) || routesModulePath
+  const routesModuleSource = existsSync(routesModulePath)
+    ? readFileSync(routesModulePath, "utf8")
+    : null
+  const routesModulePaths = new Set(
+    routesModuleSource === null ? [] : scanGeneratedModuleRoutePaths(routesModuleSource),
+  )
+
+  if (!existsSync(routesDir) && routesModuleSource === null) {
+    ctx.stdout(
+      `[admin-doctor] C: skipped route parity — no ${routesDirRel} directory and no ` +
+        `${printableRoutesModule} in host\n`,
+    )
   } else {
     for (const entry of found) {
       for (const routePath of declaredRoutePaths(entry)) {
-        if (!routeFileExists(workspaceRoutesDir, routePath)) {
-          report(`C: no route file found for ${routePath} (extension ${entry.importSpec})`)
-        }
+        if (routesModulePaths.has(routePath)) continue
+        if (routeFileExists(routesDir, routePath)) continue
+        report(
+          `C: ${routePath} (extension ${entry.importSpec}) is bound by no route file and ` +
+            `no entry in ${printableRoutesModule}`,
+        )
       }
     }
   }
@@ -198,9 +236,12 @@ export function parseImportSpecs(source: string): string[] {
 }
 
 /**
- * Statically scan an admin entry's source for declared route paths. Matches
- * `path: "/x"` object literals and `path = "/x"` destructuring defaults;
- * only absolute admin paths count.
+ * Statically scan an admin entry's route contributions for declared route
+ * paths: the resolved `path:` of every contribution in the entry's
+ * `routes: [...]` array (option-destructuring defaults and template-literal
+ * paths resolve through {@link scanRouteContributions}). Only absolute admin
+ * paths count; contributions whose path is not statically resolvable are
+ * skipped — this check stays best-effort.
  */
 function declaredRoutePaths(entry: AdminEntryScanResult): string[] {
   if (!entry.sourcePath) return []
@@ -211,12 +252,9 @@ function declaredRoutePaths(entry: AdminEntryScanResult): string[] {
     return []
   }
   const paths = new Set<string>()
-  const pattern = /\bpath\s*[:=]\s*["']([^"']+)["']/g
-  let match: RegExpExecArray | null = pattern.exec(source)
-  while (match !== null) {
-    const value = match[1]
+  for (const contribution of scanRouteContributions(source)) {
+    const value = contribution.path
     if (value?.startsWith("/") && value !== "/") paths.add(value)
-    match = pattern.exec(source)
   }
   return [...paths]
 }
