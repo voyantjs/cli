@@ -9,10 +9,15 @@ import {
   scanAdminEntries,
 } from "../lib/admin-entries.js"
 import {
+  collectDestinationBindings,
+  DEFAULT_GENERATED_DESTINATIONS_MODULE_RELATIVE_PATH,
   DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH,
   DEFAULT_ROUTES_DIR,
+  isGeneratedDestinationsFile,
+  renderAdminDestinationsModule,
   resolveAdminRoutesManifestConfig,
   scanDeclaredDestinationKeys,
+  scanGeneratedDestinationKeys,
   scanGeneratedModuleRoutePaths,
   scanResolverMapKeys,
   scanRouteContributions,
@@ -26,11 +31,13 @@ export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts
 
 /**
  * `voyant admin doctor [--config <path>] [--out <file>] [--destinations <file>]
- * [--routes-dir <dir>] [--routes-out <file>]`
+ * [--destinations-out <file>] [--routes-dir <dir>] [--routes-out <file>]`
  *
- * Report-only parity check for the manifest ↔ admin extension ↔ route chain
- * (packaged-admin RFC §4.1). Always exits 0 in this pass; CI can grep the
- * `[admin-doctor]` lines until the check graduates to a gate.
+ * Parity check for the manifest ↔ admin extension ↔ route chain
+ * (packaged-admin RFC §4.1). Findings A–C and the custom half of Finding D
+ * are report-only; the GENERATED half of Finding D is a gate — any gating
+ * finding makes the command exit 1 (aligned with `voyant admin generate
+ * --destinations --check`).
  *
  * - **A** — a module's admin entry exists but is not imported in the
  *   generated composition file (or the file is missing entirely).
@@ -44,13 +51,21 @@ export const DEFAULT_DESTINATIONS_RELATIVE_PATH = "src/lib/admin-destinations.ts
  *   `src/admin.routes.generated.tsx`, override with `--routes-out` or the
  *   manifest's `admin.routes.out` — see packaged-admin RFC §4.8). Static
  *   scan only — nothing is imported.
- * - **D** — destination parity (RFC §4.7): `AdminDestinations` keys the
- *   mounted admin entries declare via `declare module "@voyantjs/admin"`
- *   versus the keys of the host's resolver map (the object literal marked
- *   `satisfies AdminDestinationResolvers`, default
- *   `src/lib/admin-destinations.ts`, override with `--destinations`).
- *   Reported in both directions: declared-but-unresolved and
- *   resolver-without-declaration.
+ * - **D** — destination parity (RFC §4.7). Two halves:
+ *   - GENERATED (gate, exit 1): the generated resolver module (default
+ *     `src/admin.destinations.generated.ts`, override with
+ *     `--destinations-out`) must exactly reflect the route contributions'
+ *     `destination:` annotations — an annotated destination missing from the
+ *     module, a generated resolver whose annotation vanished, or any content
+ *     drift is a gating finding. An ejected module (no generated header) is
+ *     host-owned and skips the gate.
+ *   - CUSTOM (report-only): `AdminDestinations` keys the mounted admin
+ *     entries declare via `declare module "@voyantjs/admin"` versus the
+ *     union of generated resolvers and the host map's own keys (the object
+ *     literal marked `satisfies AdminDestinationResolvers`, default
+ *     `src/lib/admin-destinations.ts`, override with `--destinations`).
+ *     Reported in both directions: declared-but-unresolved and
+ *     resolver-without-declaration.
  */
 export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandResult> {
   const args = parseArgs(ctx.argv)
@@ -91,6 +106,13 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
   const report = (line: string): void => {
     findings++
     ctx.stdout(`[admin-doctor] ${line}\n`)
+  }
+  // Gating findings (the GENERATED half of Finding D) additionally flip the
+  // exit code to 1 — aligned with `voyant admin generate --destinations --check`.
+  let gateFindings = 0
+  const gate = (line: string): void => {
+    gateFindings++
+    report(`${line} [gate]`)
   }
 
   // Finding A: admin entry exists but is not imported in the generated file.
@@ -163,8 +185,107 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
     }
   }
 
-  // Finding D: destination parity — AdminDestinations declarations in the
-  // mounted admin entries vs the host's resolver map (RFC §4.7).
+  // Finding D: destination parity (RFC §4.7). Shared inputs: the admin entry
+  // sources (declared keys + `destination:` annotations).
+  const entrySources: Array<{ importSpec: string; source: string }> = []
+  for (const entry of found) {
+    if (!entry.sourcePath || !entry.importSpec) continue
+    try {
+      entrySources.push({
+        importSpec: entry.importSpec,
+        source: readFileSync(entry.sourcePath, "utf8"),
+      })
+    } catch {
+      // Unreadable entries stay best-effort, exactly like Findings A–C.
+    }
+  }
+  const declaredBy = new Map<string, string[]>()
+  for (const entry of entrySources) {
+    for (const key of scanDeclaredDestinationKeys(entry.source)) {
+      const declarers = declaredBy.get(key) ?? []
+      declarers.push(entry.importSpec)
+      declaredBy.set(key, declarers)
+    }
+  }
+  const { bindings } = collectDestinationBindings(entrySources)
+
+  // D, GENERATED half (gate): the generated resolver module must exactly
+  // reflect the annotations. Same comparison `--check` makes, so the two
+  // gates can never disagree.
+  const destinationsOutFlag = getStringFlag(args, "destinations-out")
+  const generatedDestinationsPath = destinationsOutFlag
+    ? isAbsolute(destinationsOutFlag)
+      ? destinationsOutFlag
+      : resolve(ctx.cwd, destinationsOutFlag)
+    : join(configDir, DEFAULT_GENERATED_DESTINATIONS_MODULE_RELATIVE_PATH)
+  const printableGeneratedDestinations =
+    relative(ctx.cwd, generatedDestinationsPath) || generatedDestinationsPath
+  const generatedDestinationsSource = existsSync(generatedDestinationsPath)
+    ? readFileSync(generatedDestinationsPath, "utf8")
+    : null
+  // Keys the generated module (or its ejected, host-owned replacement)
+  // resolves — they count toward the custom half's resolver union.
+  let generatedKeys: string[] = []
+
+  if (
+    generatedDestinationsSource !== null &&
+    !isGeneratedDestinationsFile(generatedDestinationsSource)
+  ) {
+    generatedKeys = scanGeneratedDestinationKeys(generatedDestinationsSource) ?? []
+    ctx.stdout(
+      `[admin-doctor] D: skipped generated-destinations gate — ${printableGeneratedDestinations} ` +
+        `has no generated header (ejected, host-owned)\n`,
+    )
+  } else if (generatedDestinationsSource === null) {
+    if (bindings.length > 0) {
+      gate(
+        `D: ${printableGeneratedDestinations} is missing but ${bindings.length} route ` +
+          `contribution(s) declare a destination — run \`voyant admin generate --destinations\``,
+      )
+    }
+  } else {
+    generatedKeys = scanGeneratedDestinationKeys(generatedDestinationsSource) ?? []
+    const generatedKeySet = new Set(generatedKeys)
+    const boundKeys = new Set(bindings.map((binding) => binding.key))
+    for (const binding of bindings) {
+      if (!generatedKeySet.has(binding.key)) {
+        gate(
+          `D: annotated destination "${binding.key}" (${binding.importSpec}) has no resolver ` +
+            `in ${printableGeneratedDestinations} — run \`voyant admin generate --destinations\``,
+        )
+      }
+    }
+    for (const key of generatedKeys) {
+      if (!boundKeys.has(key)) {
+        gate(
+          `D: generated resolver for "${key}" in ${printableGeneratedDestinations} matches no ` +
+            `\`destination:\` annotation in any mounted admin entry — run ` +
+            `\`voyant admin generate --destinations\``,
+        )
+      }
+    }
+    const expected =
+      bindings.length === 0
+        ? null
+        : renderAdminDestinationsModule({
+            bindings,
+            importSpecs: entrySources.map((entry) => entry.importSpec),
+          })
+    if (expected === null) {
+      gate(
+        `D: ${printableGeneratedDestinations} is stale — no route-backed destination ` +
+          `annotations remain; run \`voyant admin generate --destinations\``,
+      )
+    } else if (expected !== generatedDestinationsSource) {
+      gate(
+        `D: ${printableGeneratedDestinations} is out of date — run ` +
+          `\`voyant admin generate --destinations\``,
+      )
+    }
+  }
+
+  // D, CUSTOM half (report-only): declared keys vs the union of generated
+  // resolvers and the host map's own (hand-written) keys.
   const destinationsFlag = getStringFlag(args, "destinations")
   const destinationsPath = destinationsFlag
     ? isAbsolute(destinationsFlag)
@@ -184,24 +305,9 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
         `[admin-doctor] D: skipped destination parity — no \`satisfies AdminDestinationResolvers\` map in ${printableDestinations}\n`,
       )
     } else {
-      const resolverKeySet = new Set(resolverKeys)
-      const declaredBy = new Map<string, string[]>()
-      for (const entry of found) {
-        if (!entry.sourcePath || !entry.importSpec) continue
-        let source: string
-        try {
-          source = readFileSync(entry.sourcePath, "utf8")
-        } catch {
-          continue
-        }
-        for (const key of scanDeclaredDestinationKeys(source)) {
-          const declarers = declaredBy.get(key) ?? []
-          declarers.push(entry.importSpec)
-          declaredBy.set(key, declarers)
-        }
-      }
+      const resolvedKeySet = new Set([...generatedKeys, ...resolverKeys])
       for (const [key, declarers] of declaredBy) {
-        if (!resolverKeySet.has(key)) {
+        if (!resolvedKeySet.has(key)) {
           report(
             `D: destination "${key}" declared by ${declarers.join(", ")} has no resolver in ${printableDestinations}`,
           )
@@ -218,9 +324,10 @@ export async function adminDoctorCommand(ctx: CommandContext): Promise<CommandRe
   }
 
   ctx.stdout(
-    `[admin-doctor] done: ${results.length} modules, ${found.length} admin entries, ${findings} finding(s)\n`,
+    `[admin-doctor] done: ${results.length} modules, ${found.length} admin entries, ` +
+      `${findings} finding(s)${gateFindings > 0 ? ` — ${gateFindings} gating, exit 1` : ""}\n`,
   )
-  return 0
+  return gateFindings > 0 ? 1 : 0
 }
 
 /** Extract `from "<spec>"` specifiers from a generated composition file. */

@@ -14,11 +14,15 @@ import {
   type AdminRoutesModuleSection,
   alternativeRouteFileRelPaths,
   canonicalRouteFileRelPath,
+  collectDestinationBindings,
+  DEFAULT_GENERATED_DESTINATIONS_MODULE_RELATIVE_PATH,
   DEFAULT_GENERATED_ROUTES_MODULE_RELATIVE_PATH,
   DEFAULT_ROUTES_DIR,
   fileRouteIdFor,
+  isGeneratedDestinationsFile,
   isGeneratedRouteFile,
   isImplementedContribution,
+  renderAdminDestinationsModule,
   renderAdminRoutesModule,
   renderRouteFile,
   resolveAdminRoutesManifestConfig,
@@ -72,6 +76,21 @@ import type { CommandContext, CommandResult } from "../types.js"
  * ZERO-PROP `component` route (no `$param` segments) under the host's
  * file-based route tree.
  *
+ * `voyant admin generate --destinations [--out <file>] [--check]`
+ *
+ * Generated destination resolver map (packaged-admin RFC §4.7 endgame):
+ * statically scan each admin entry's route contributions for `destination:`
+ * annotations — the DECLARED bindings between a semantic destination key and
+ * the one route whose path satisfies it by pure param interpolation — and
+ * emit ONE committed module (default `src/admin.destinations.generated.ts`)
+ * holding a typed resolver per binding (`encodeURIComponent` interpolation,
+ * `destinationParams` name mapping), `satisfies
+ * Partial<AdminDestinationResolvers>`. The host's resolver map shrinks to
+ * `{ ...generatedAdminDestinations, ...custom } satisfies
+ * AdminDestinationResolvers` — only genuinely custom resolvers (search-param
+ * construction, multi-route targets) stay hand-written. A target file
+ * without the generated header is never overwritten (ejected, host-owned).
+ *
  * `--check` writes nothing and exits 1 when committed output is missing or
  * differs from what would be generated (CI drift gate).
  */
@@ -117,6 +136,10 @@ export async function adminGenerateCommand(ctx: CommandContext): Promise<Command
     return getBooleanFlag(args, "files")
       ? generateRouteFiles(routesOptions)
       : generateRoutesModule({ ...routesOptions, outFlag })
+  }
+
+  if (getBooleanFlag(args, "destinations")) {
+    return generateDestinationsModule({ ctx, configDir, results, check, outFlag })
   }
 
   for (const result of results) {
@@ -447,6 +470,125 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
       `[admin-generate] routes: removed ${printableFile} (superseded generated thin route file)\n`,
     )
   }
+  if (existing === content) {
+    ctx.stdout(summary("is up to date"))
+    return 0
+  }
+  mkdirSync(dirname(outPath), { recursive: true })
+  writeFileSync(outPath, content)
+  ctx.stdout(summary(existing === null ? "written" : "rewritten"))
+  return 0
+}
+
+interface GenerateDestinationsModuleOptions {
+  ctx: CommandContext
+  configDir: string
+  results: ReadonlyArray<AdminEntryScanResult>
+  check: boolean
+  outFlag: string | undefined
+}
+
+/**
+ * `voyant admin generate --destinations` — emit the generated destination
+ * resolver map (packaged-admin RFC §4.7 endgame).
+ *
+ * Per annotated contribution:
+ * - no statically resolvable route path → note, skipped (the generator only
+ *   trusts what it can read without executing the entry)
+ * - duplicate destination key across contributions → first wins, noted
+ * - otherwise → a pure path-interpolation resolver is emitted
+ *
+ * A target module without the generated header is the host's own (ejected
+ * wholesale) and is never overwritten. When no annotations remain, a stale
+ * generated module is removed (reported as drift with `--check`).
+ */
+function generateDestinationsModule(options: GenerateDestinationsModuleOptions): CommandResult {
+  const { ctx, configDir, results, check } = options
+  const outRel = options.outFlag ?? DEFAULT_GENERATED_DESTINATIONS_MODULE_RELATIVE_PATH
+  const outPath = isAbsolute(outRel)
+    ? outRel
+    : options.outFlag
+      ? resolve(ctx.cwd, outRel)
+      : join(configDir, outRel)
+  const printableOut = relative(ctx.cwd, outPath) || outPath
+
+  const found = foundEntries(results)
+  const sources: Array<{ importSpec: string; source: string }> = []
+  for (const entry of found) {
+    try {
+      sources.push({ importSpec: entry.importSpec, source: readFileSync(entry.sourcePath, "utf8") })
+    } catch {
+      ctx.stderr(`[admin-generate] destinations: note — ${entry.importSpec} source not readable\n`)
+    }
+  }
+
+  const { bindings, notes } = collectDestinationBindings(sources)
+  for (const note of notes) {
+    ctx.stderr(`[admin-generate] destinations: note — ${note}\n`)
+  }
+
+  if (bindings.length === 0) {
+    const stale = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
+    if (stale !== null && isGeneratedDestinationsFile(stale)) {
+      if (check) {
+        ctx.stderr(
+          `[admin-generate] destinations: ${printableOut} is stale — no route-backed ` +
+            `destination annotations remain; run \`voyant admin generate --destinations\`\n`,
+        )
+        return 1
+      }
+      rmSync(outPath)
+      ctx.stdout(
+        `[admin-generate] destinations: removed ${printableOut} — no route-backed ` +
+          `destination annotations remain\n`,
+      )
+      return 0
+    }
+    if (stale !== null) {
+      ctx.stderr(
+        `[admin-generate] destinations: ${printableOut} has no generated header (ejected, ` +
+          `host-owned) — left in place despite zero destination annotations\n`,
+      )
+    }
+    ctx.stdout(
+      `[admin-generate] destinations: no route-backed destination annotations across ` +
+        `${found.length} admin entries — nothing to emit\n`,
+    )
+    return 0
+  }
+
+  const content = renderAdminDestinationsModule({
+    bindings,
+    importSpecs: sources.map((entry) => entry.importSpec),
+  })
+
+  const existing = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
+  if (existing !== null && !isGeneratedDestinationsFile(existing)) {
+    ctx.stderr(
+      `[admin-generate] destinations: skipped ${printableOut} — it has no generated header ` +
+        `(ejected, host-owned)\n`,
+    )
+    return 0
+  }
+
+  const summary = (state: string): string =>
+    `[admin-generate] destinations: ${bindings.length} route-backed resolver(s) across ` +
+    `${found.length} admin entries — ${printableOut} ${state}\n`
+
+  if (check) {
+    if (existing !== content) {
+      ctx.stderr(
+        existing === null
+          ? `[admin-generate] destinations: ${printableOut} is missing — run \`voyant admin generate --destinations\`\n`
+          : `[admin-generate] destinations: ${printableOut} is out of date — run \`voyant admin generate --destinations\`\n`,
+      )
+      ctx.stdout(summary("drifted"))
+      return 1
+    }
+    ctx.stdout(summary("is up to date"))
+    return 0
+  }
+
   if (existing === content) {
     ctx.stdout(summary("is up to date"))
     return 0
