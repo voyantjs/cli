@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  alternativeRouteFileRelPaths,
   canonicalRouteFileRelPath,
+  collectContributionRoutePaths,
   collectDestinationBindings,
   DEFAULT_ROUTES_MODULE_IMPORTS,
   fileRouteIdFor,
@@ -177,6 +179,124 @@ describe("scanRouteContributions", () => {
   })
 })
 
+describe("scanRouteContributions — redirect contributions (RFC #1643 final sweep)", () => {
+  const REDIRECT_SOURCE = `
+export function createCatalogishAdminExtension(options = {}) {
+  const { basePath = "/catalogish" } = options
+  return defineAdminExtension({
+    id: "catalogish",
+    routes: [
+      {
+        // Index redirect (formerly a host file route).
+        id: "catalogish-index",
+        path: basePath,
+        title: "Catalog",
+        redirectTo: \`\${basePath}/products\`,
+      },
+      { id: "catalogish-literal", path: "/x", title: "X", redirectTo: "/x/y" },
+      { id: "catalogish-unresolvable", path: "/y", title: "Y", redirectTo: options.somewhere },
+    ],
+  })
+}
+`
+
+  it("extracts redirectTo, template-literal-resolved like path", () => {
+    const [index, literal, unresolvable] = scanRouteContributions(REDIRECT_SOURCE)
+    expect(index).toMatchObject({
+      id: "catalogish-index",
+      path: "/catalogish",
+      hasRedirectTo: true,
+      redirectTo: "/catalogish/products",
+    })
+    expect(literal).toMatchObject({ hasRedirectTo: true, redirectTo: "/x/y" })
+    expect(unresolvable).toMatchObject({ hasRedirectTo: true, redirectTo: null })
+  })
+
+  it("counts redirect-only contributions as implemented", () => {
+    const routes = scanRouteContributions(REDIRECT_SOURCE)
+    expect(routes.map((route) => isImplementedContribution(route))).toEqual([true, true, true])
+  })
+
+  it("leaves hasRedirectTo false without the key", () => {
+    const [route] = scanRouteContributions(PROMOTIONS_LIKE_SOURCE)
+    expect(route).toMatchObject({ hasRedirectTo: false, redirectTo: null })
+  })
+})
+
+const NESTED_SOURCE = `
+export function createCoreishAdminExtension(options = {}) {
+  const { basePath = "/settings" } = options
+  return defineAdminExtension({
+    id: "coreish",
+    routes: [
+      { id: "coreish-dashboard", path: "/", title: "Dashboard", page: () => import("./d.js") },
+      {
+        id: "coreish-settings",
+        path: basePath,
+        title: "Settings",
+        page: () => import("./settings-layout.js"),
+        children: [
+          {
+            id: "coreish-settings-index",
+            path: "/",
+            title: "Settings",
+            redirectTo: \`\${basePath}/team\`,
+          },
+          { id: "coreish-settings-team", path: "/team", title: "Team", page: () => import("./t.js") },
+          // Runtime-known children are spread in — invisible to the scanner.
+          ...extraPages.map((page) => ({ id: page.id, path: page.path, page: page.page })),
+        ],
+      },
+    ],
+  })
+}
+`
+
+describe("scanRouteContributions — nested children", () => {
+  it("descends into children arrays (parent-relative paths, '/' = index)", () => {
+    const [dashboard, settings] = scanRouteContributions(NESTED_SOURCE)
+    expect(dashboard?.children).toBeNull()
+    expect(settings?.id).toBe("coreish-settings")
+    expect(settings?.path).toBe("/settings")
+    const children = settings?.children
+    expect(children?.map((child) => child.id)).toEqual([
+      "coreish-settings-index",
+      "coreish-settings-team",
+    ])
+    expect(children?.[0]).toMatchObject({
+      path: "/",
+      hasRedirectTo: true,
+      redirectTo: "/settings/team",
+    })
+    expect(children?.[1]).toMatchObject({ path: "/team", hasPage: true })
+    expect(children?.map((child) => isImplementedContribution(child))).toEqual([true, true])
+  })
+
+  it("treats a non-literal children value as a leaf (no static children)", () => {
+    const source = `
+      const x = { routes: [{ id: "a", path: "/a", page: () => import("./a.js"), children: kids }] }
+    `
+    expect(scanRouteContributions(source)[0]?.children).toBeNull()
+  })
+})
+
+describe("collectContributionRoutePaths", () => {
+  it("resolves child paths against the parent and skips index children and '/'", () => {
+    const contributions = scanRouteContributions(NESTED_SOURCE)
+    expect(collectContributionRoutePaths(contributions).sort()).toEqual([
+      "/settings",
+      "/settings/team",
+    ])
+  })
+
+  it("skips contributions whose path is not statically resolvable", () => {
+    const source = `
+      const x = { routes: [{ id: "a", path: somewhere, page: () => import("./a.js") }] }
+    `
+    expect(collectContributionRoutePaths(scanRouteContributions(source))).toEqual([])
+  })
+})
+
 describe("scanExtensionId", () => {
   it("reads the top-level id literal of defineAdminExtension", () => {
     expect(scanExtensionId(PROMOTIONS_LIKE_SOURCE)).toBe("foo")
@@ -285,6 +405,32 @@ export function createFooAdminExtension() {
 })
 
 describe("scanGeneratedModuleRoutePaths", () => {
+  it("reconstructs absolute paths for nested createRoute trees", () => {
+    const source = `
+      const workspace = () => WorkspaceRoute
+      export const CoreSettingsRoute = createRoute({
+        getParentRoute: workspace,
+        path: "/settings",
+        ...adminExtensionRouteOptions(coreExtension, "core-settings", runtime),
+      })
+      const coreSettings = () => CoreSettingsRoute
+      export const CoreSettingsIndexRoute = createRoute({
+        getParentRoute: coreSettings,
+        path: "/",
+        ...adminExtensionRouteOptions(coreExtension, "core-settings-index", runtime),
+      })
+      export const CoreSettingsTeamRoute = createRoute({
+        getParentRoute: coreSettings,
+        path: "/team",
+        ...adminExtensionRouteOptions(coreExtension, "core-settings-team", runtime),
+      })
+    `
+    const paths = scanGeneratedModuleRoutePaths(source)
+    expect(paths).toContain("/settings")
+    expect(paths).toContain("/settings/")
+    expect(paths).toContain("/settings/team")
+  })
+
   it("collects the path literals of createRoute calls", () => {
     const source = `
       export const PromotionsIndexRoute = createRoute({
@@ -395,6 +541,12 @@ describe("route file paths", () => {
 
   it("derives the canonical generated file path", () => {
     expect(canonicalRouteFileRelPath("/legal/templates")).toBe("legal/templates/index.tsx")
+  })
+
+  it("does not treat the layout's route.tsx as a binding for the root path", () => {
+    // `/` is the workspace's index child (e.g. the core dashboard) — only
+    // index spellings may eject it, never the layout's own route.tsx.
+    expect(alternativeRouteFileRelPaths("/")).toEqual(["index.ts"])
   })
 })
 
@@ -569,6 +721,275 @@ describe("renderAdminRoutesModule", () => {
     expect(content).toContain(`  "/bookings/$id": typeof BookingsDetailRoute`)
     expect(content).toContain(`  "/_workspace/bookings/$id": typeof BookingsDetailRoute`)
     expect(content.endsWith("}\n")).toBe(true)
+  })
+})
+
+describe("renderAdminRoutesModule — nested subtrees (core-extension shape)", () => {
+  const options = {
+    moduleBaseName: "admin.routes.generated",
+    imports: DEFAULT_ROUTES_MODULE_IMPORTS,
+    workspaceRouteModule: "@/routes/_workspace/route",
+    routeIdPrefix: "/_workspace",
+    sections: [
+      {
+        extensionId: "core",
+        importSpec: "@voyantjs/admin-app/core-extension",
+        routes: [
+          {
+            constName: "CoreDashboardRoute",
+            routeId: "core-dashboard",
+            path: "/",
+            searchSchemaIdent: null,
+          },
+          {
+            constName: "CoreSettingsRoute",
+            routeId: "core-settings",
+            path: "/settings",
+            searchSchemaIdent: null,
+            children: [
+              {
+                constName: "CoreSettingsIndexRoute",
+                routeId: "core-settings-index",
+                path: "/",
+                searchSchemaIdent: null,
+              },
+              {
+                constName: "CoreSettingsTeamRoute",
+                routeId: "core-settings-team",
+                path: "/team",
+                searchSchemaIdent: null,
+              },
+            ],
+            subtreeComment: [
+              "// Settings subtree: the static children above keep literal paths for typed",
+              "// links; app-supplied extra settings pages (factory `settings.extraPages`,",
+              "// invisible to the generator) bind at runtime via adminExtensionChildRoutes.",
+            ],
+          },
+        ],
+      },
+    ],
+  }
+  const content = renderAdminRoutesModule(options)
+
+  it("imports adminExtensionChildRoutes alongside adminExtensionRouteOptions", () => {
+    expect(content).toContain(
+      `import { adminExtensionChildRoutes, adminExtensionRouteOptions } from "@voyantjs/admin-app"`,
+    )
+  })
+
+  it("emits the parent, an accessor thunk, children with getParentRoute, and addChildren", () => {
+    expect(content).toContain(
+      [
+        "const coreSettings = () => CoreSettingsRoute",
+        "",
+        "export const CoreSettingsIndexRoute = createRoute({",
+        "  getParentRoute: coreSettings,",
+        `  path: "/",`,
+        `  ...adminExtensionRouteOptions(coreExtension, "core-settings-index", runtime),`,
+        "})",
+      ].join("\n"),
+    )
+    expect(content).toContain(
+      [
+        "// Settings subtree: the static children above keep literal paths for typed",
+        "// links; app-supplied extra settings pages (factory `settings.extraPages`,",
+        "// invisible to the generator) bind at runtime via adminExtensionChildRoutes.",
+        "export const CoreSettingsRouteWithChildren = CoreSettingsRoute.addChildren([",
+        "  CoreSettingsIndexRoute,",
+        "  CoreSettingsTeamRoute,",
+        `  ...adminExtensionChildRoutes(coreExtension, "core-settings", coreSettings, runtime, {`,
+        "    exclude: [",
+        `      "/",`,
+        `      "/team",`,
+        "    ],",
+        "  }),",
+        "])",
+      ].join("\n"),
+    )
+  })
+
+  /** Options with a single core-settings-like parent and the given children. */
+  function nestedOptions(
+    children: ReadonlyArray<{ constName: string; routeId: string; path: string }>,
+    subtreeComment?: ReadonlyArray<string>,
+  ): Parameters<typeof renderAdminRoutesModule>[0] {
+    return {
+      moduleBaseName: "admin.routes.generated",
+      imports: DEFAULT_ROUTES_MODULE_IMPORTS,
+      workspaceRouteModule: "@/routes/_workspace/route",
+      routeIdPrefix: "/_workspace",
+      sections: [
+        {
+          extensionId: "core",
+          importSpec: "@voyantjs/admin-app/core-extension",
+          routes: [
+            {
+              constName: "CoreSettingsRoute",
+              routeId: "core-settings",
+              path: "/settings",
+              searchSchemaIdent: null,
+              children: children.map((child) => ({ ...child, searchSchemaIdent: null })),
+              subtreeComment,
+            },
+          ],
+        },
+      ],
+    }
+  }
+
+  it("expands the exclude list past the 100-column width (reference style)", () => {
+    const longChildren = [
+      "/",
+      "/team",
+      "/api-tokens",
+      "/channels",
+      "/taxes",
+      "/cost-categories",
+      "/pricing-categories",
+      "/price-catalogs",
+      "/product-types",
+      "/product-tags",
+    ]
+    const expanded = renderAdminRoutesModule(
+      nestedOptions(
+        longChildren.map((path, index) => ({
+          constName: `Child${index}Route`,
+          routeId: `core-settings-${index}`,
+          path,
+        })),
+      ),
+    )
+    expect(expanded).toContain(
+      [
+        `  ...adminExtensionChildRoutes(coreExtension, "core-settings", coreSettings, runtime, {`,
+        "    exclude: [",
+        `      "/",`,
+        `      "/team",`,
+        `      "/api-tokens",`,
+        `      "/channels",`,
+        `      "/taxes",`,
+        `      "/cost-categories",`,
+        `      "/pricing-categories",`,
+        `      "/price-catalogs",`,
+        `      "/product-types",`,
+        `      "/product-tags",`,
+        "    ],",
+        "  }),",
+        "])",
+      ].join("\n"),
+    )
+  })
+
+  it("falls back to a generic subtree comment when none is supplied", () => {
+    const generic = renderAdminRoutesModule(
+      nestedOptions([
+        { constName: "CoreSettingsTeamRoute", routeId: "core-settings-team", path: "/team" },
+      ]),
+    )
+    expect(generic).toContain(
+      "// core-settings subtree: the static children above keep literal paths",
+    )
+  })
+
+  it("references the WithChildren const in the tree array (children excluded)", () => {
+    expect(content).toContain(
+      [
+        "export const adminExtensionRoutes = [",
+        "  CoreDashboardRoute,",
+        "  CoreSettingsRouteWithChildren,",
+        "]",
+      ].join("\n"),
+    )
+  })
+
+  it("emits the typed-link maps exactly as the nested reference shapes", () => {
+    // ByFullPath: parent → WithChildren; index child claims the
+    // trailing-slash key; other children absolute keys.
+    expect(content).toContain(
+      [
+        "export interface AdminExtensionRoutesByFullPath {",
+        `  "/": typeof CoreDashboardRoute`,
+        `  "/settings": typeof CoreSettingsRouteWithChildren`,
+        `  "/settings/": typeof CoreSettingsIndexRoute`,
+        `  "/settings/team": typeof CoreSettingsTeamRoute`,
+        "}",
+      ].join("\n"),
+    )
+    // ByTo: the index child claims the PARENT key; no trailing-slash key.
+    expect(content).toContain(
+      [
+        "export interface AdminExtensionRoutesByTo {",
+        `  "/": typeof CoreDashboardRoute`,
+        `  "/settings": typeof CoreSettingsIndexRoute`,
+        `  "/settings/team": typeof CoreSettingsTeamRoute`,
+        "}",
+      ].join("\n"),
+    )
+    // ById: like ByFullPath with the workspace prefix.
+    expect(content).toContain(
+      [
+        "export interface AdminExtensionRoutesById {",
+        `  "/_workspace/": typeof CoreDashboardRoute`,
+        `  "/_workspace/settings": typeof CoreSettingsRouteWithChildren`,
+        `  "/_workspace/settings/": typeof CoreSettingsIndexRoute`,
+        `  "/_workspace/settings/team": typeof CoreSettingsTeamRoute`,
+        "}",
+      ].join("\n"),
+    )
+  })
+
+  it("keeps the parent's own key for ByTo when the subtree has no index child", () => {
+    const noIndex = renderAdminRoutesModule(
+      nestedOptions([
+        { constName: "CoreSettingsTeamRoute", routeId: "core-settings-team", path: "/team" },
+      ]),
+    )
+    expect(noIndex).toContain(
+      [
+        "export interface AdminExtensionRoutesByTo {",
+        `  "/settings": typeof CoreSettingsRouteWithChildren`,
+        `  "/settings/team": typeof CoreSettingsTeamRoute`,
+        "}",
+      ].join("\n"),
+    )
+  })
+
+  it("imports child search schemas and round-trips through the module path scan", () => {
+    const base = nestedOptions([])
+    const withSchema = renderAdminRoutesModule({
+      ...base,
+      sections: [
+        {
+          extensionId: "core",
+          importSpec: "@voyantjs/admin-app/core-extension",
+          routes: [
+            {
+              constName: "CoreSettingsRoute",
+              routeId: "core-settings",
+              path: "/settings",
+              searchSchemaIdent: null,
+              children: [
+                {
+                  constName: "CoreSettingsTeamRoute",
+                  routeId: "core-settings-team",
+                  path: "/team",
+                  searchSchemaIdent: "teamSearchSchema",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(withSchema).toContain(
+      `import { teamSearchSchema } from "@voyantjs/admin-app/core-extension"`,
+    )
+    expect(withSchema).toContain("  validateSearch: teamSearchSchema,")
+    // The emitted nested module is readable back by the doctor's path scan.
+    const paths = scanGeneratedModuleRoutePaths(withSchema)
+    expect(paths).toContain("/settings")
+    expect(paths).toContain("/settings/team")
   })
 })
 

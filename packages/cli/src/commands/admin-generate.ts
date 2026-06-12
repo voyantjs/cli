@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { VoyantConfig } from "@voyantjs/core/config"
-
+import { resolveCoreAdminEntry } from "../lib/admin-core-entry.js"
 import {
   type AdminEntryScanResult,
   DEFAULT_GENERATED_RELATIVE_PATH,
@@ -10,6 +10,7 @@ import {
 } from "../lib/admin-entries.js"
 import {
   type AdminRoutesManifestConfig,
+  type AdminRoutesModuleChildRoute,
   type AdminRoutesModuleRoute,
   type AdminRoutesModuleSection,
   alternativeRouteFileRelPaths,
@@ -28,6 +29,7 @@ import {
   resolveAdminRoutesManifestConfig,
   resolveSearchSchemaIdent,
   routeIdPrefixFor,
+  type ScannedRouteContribution,
   scanExtensionId,
   scanRouteContributions,
   workspaceRouteModuleFor,
@@ -57,10 +59,17 @@ import type { CommandContext, CommandResult } from "../types.js"
  * Code-assembled admin route module (packaged-admin RFC §4.8 endgame):
  * statically scan each admin entry's route contributions and emit ONE
  * committed module (default `src/admin.routes.generated.tsx`) holding a
- * code-based `createRoute` per implemented contribution (`page` or
- * `component` present — `$param` routes included), its options resolved from
- * the host-registered extension instances via `adminExtensionRouteOptions`,
- * plus the typed-link map interfaces the host's `router.tsx` merges. NO
+ * code-based `createRoute` per implemented contribution (`page`,
+ * `component`, or `redirectTo` present — `$param` routes included), its
+ * options resolved from the host-registered extension instances via
+ * `adminExtensionRouteOptions`, plus the typed-link map interfaces the
+ * host's `router.tsx` merges. Layout contributions with nested `children`
+ * become `addChildren` subtrees whose tail spreads
+ * `adminExtensionChildRoutes` for runtime-known children. The BUILT-IN core
+ * entry (`@voyantjs/admin-app/core-extension`, extension id `core`, factory
+ * `createAdminCoreExtension`) is included independently of the manifest
+ * module list whenever the package is resolvable from the host with a
+ * `"./core-extension"` export — pre-core hosts are unaffected. NO
  * per-route files exist for package-delivered pages. A target file without
  * the generated header is never overwritten — deleting the header is how a
  * host ejects the module; a hand-written route file binding a contribution's
@@ -255,8 +264,13 @@ interface GenerateRoutesModuleOptions extends GenerateRouteFilesOptions {
  * Per contribution:
  * - no statically resolvable id/path → note, skipped (the generator only
  *   trusts what it can read without executing the entry)
- * - no implementation (`page`/`component`) → skipped, metadata-only — those
- *   stay bound by hand-written host route files
+ * - no implementation (`page`/`component`/`redirectTo`) → skipped,
+ *   metadata-only — those stay bound by hand-written host route files
+ * - nested `children: [...]` → the contribution becomes a layout parent:
+ *   statically scanned children are emitted as literal child routes (typed
+ *   links included) and listed on the runtime binding's `exclude:`;
+ *   runtime-known children (spreads the scan cannot see) bind through the
+ *   emitted `adminExtensionChildRoutes` tail
  * - a route file under the routes dir WITHOUT the generated header → that
  *   single route is ejected: omitted from the module and reported
  * - a leftover GENERATED thin route file (RFC §4.2 increment 1) → superseded
@@ -264,6 +278,11 @@ interface GenerateRoutesModuleOptions extends GenerateRouteFilesOptions {
  * - `validateSearch` whose schema identifier cannot be statically resolved
  *   to an export of the entry → emitted without the typed search contract,
  *   noted (the runtime contract still applies via the contribution)
+ *
+ * The built-in core entry contributes its static route table (the factory
+ * builds routes imperatively, invisible to the source scanner); it assumes
+ * default factory options — hosts using `settings.omit` or per-surface
+ * ejection flags should eject or hand-edit the affected routes.
  *
  * A target module without the generated header is the host's own (ejected
  * wholesale) and is never overwritten.
@@ -287,6 +306,18 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
   const sections: AdminRoutesModuleSection[] = []
   const found = foundEntries(results)
 
+  // Manifest-derived admin entries plus the built-in core entry
+  // (`@voyantjs/admin-app/core-extension`), which is not a manifest module.
+  // Conditional on resolvability so pre-core hosts are unaffected.
+  interface RoutesEntry {
+    importSpec: string
+    extensionId: string
+    /** Entry source for schema-identifier resolution; null for the built-in core entry. */
+    source: string | null
+    contributions: ReadonlyArray<ScannedRouteContribution>
+    subtreeComments?: Readonly<Record<string, ReadonlyArray<string>>>
+  }
+  const routesEntries: RoutesEntry[] = []
   for (const entry of found) {
     let source: string
     try {
@@ -295,9 +326,82 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
       ctx.stderr(`[admin-generate] routes: note — ${entry.importSpec} source not readable\n`)
       continue
     }
+    routesEntries.push({
+      importSpec: entry.importSpec,
+      extensionId: scanExtensionId(source) ?? entry.domain,
+      source,
+      contributions: scanRouteContributions(source),
+    })
+  }
+  const coreEntry = resolveCoreAdminEntry(configDir)
+  if (coreEntry) {
+    if (coreEntry.note) {
+      ctx.stderr(`[admin-generate] routes: note — ${coreEntry.note}\n`)
+    }
+    routesEntries.push({
+      importSpec: coreEntry.importSpec,
+      extensionId: coreEntry.extensionId,
+      source: null,
+      contributions: coreEntry.contributions,
+      subtreeComments: coreEntry.subtreeComments,
+    })
+  } else {
+    ctx.stderr(
+      `[admin-generate] routes: note — built-in core entry skipped (no ` +
+        `@voyantjs/admin-app with a "./core-extension" export resolvable from the host)\n`,
+    )
+  }
 
+  /** Note + null when a validateSearch schema is not an exported identifier. */
+  const schemaIdentFor = (
+    contribution: ScannedRouteContribution,
+    entry: RoutesEntry,
+  ): string | null => {
+    if (!contribution.hasValidateSearch) return null
+    const ident =
+      contribution.validateSearchRaw === null || entry.source === null
+        ? null
+        : resolveSearchSchemaIdent(contribution.validateSearchRaw, entry.source)
+    if (ident === null) {
+      ctx.stderr(
+        `[admin-generate] routes: note — ${contribution.id} has a validateSearch whose ` +
+          `schema is not an export of ${entry.importSpec}; emitted without a typed ` +
+          `search contract\n`,
+      )
+    }
+    return ident
+  }
+
+  /**
+   * Existing route files for an absolute path. Returns null when a
+   * hand-written (header-less) file binds it — that route is ejected; the
+   * caller reports and skips. Generator-owned leftovers are superseded.
+   */
+  const probeRouteFiles = (absolutePath: string): { superseded: string[] } | null => {
+    const existingFiles = [
+      canonicalRouteFileRelPath(absolutePath),
+      ...alternativeRouteFileRelPaths(absolutePath),
+    ]
+      .map((rel) => join(routesDir, rel))
+      .filter((candidate) => existsSync(candidate))
+    const handWritten = existingFiles.find(
+      (file) => !isGeneratedRouteFile(readFileSync(file, "utf8")),
+    )
+    if (handWritten !== undefined) {
+      ejected++
+      const printableFile = relative(ctx.cwd, handWritten) || handWritten
+      ctx.stderr(
+        `[admin-generate] routes: skipped ${absolutePath} — hand-written host ` +
+          `${printableFile} binds this route (ejected)\n`,
+      )
+      return null
+    }
+    return { superseded: existingFiles }
+  }
+
+  for (const entry of routesEntries) {
     const routes: AdminRoutesModuleRoute[] = []
-    for (const contribution of scanRouteContributions(source)) {
+    for (const contribution of entry.contributions) {
       if (contribution.id === null || contribution.path === null) {
         ctx.stderr(
           `[admin-generate] routes: note — skipped a ${entry.importSpec} contribution ` +
@@ -314,53 +418,65 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
 
       // Route-level ejection: a route file for this path that is NOT
       // generator-owned means the host hand-binds it — leave it out.
-      const existingFiles = [
-        canonicalRouteFileRelPath(contribution.path),
-        ...alternativeRouteFileRelPaths(contribution.path),
-      ]
-        .map((rel) => join(routesDir, rel))
-        .filter((candidate) => existsSync(candidate))
-      const handWritten = existingFiles.find(
-        (file) => !isGeneratedRouteFile(readFileSync(file, "utf8")),
-      )
-      if (handWritten !== undefined) {
-        ejected++
-        const printableFile = relative(ctx.cwd, handWritten) || handWritten
-        ctx.stderr(
-          `[admin-generate] routes: skipped ${contribution.path} — hand-written host ` +
-            `${printableFile} binds this route (ejected)\n`,
-        )
-        continue
-      }
       // Leftover generated thin files (increment 1) are superseded by the module.
-      supersededFiles.push(...existingFiles)
+      const probe = probeRouteFiles(contribution.path)
+      if (probe === null) continue
+      supersededFiles.push(...probe.superseded)
 
-      let searchSchemaIdent: string | null = null
-      if (contribution.hasValidateSearch) {
-        searchSchemaIdent =
-          contribution.validateSearchRaw === null
-            ? null
-            : resolveSearchSchemaIdent(contribution.validateSearchRaw, source)
-        if (searchSchemaIdent === null) {
-          ctx.stderr(
-            `[admin-generate] routes: note — ${contribution.id} has a validateSearch whose ` +
-              `schema is not an export of ${entry.importSpec}; emitted without a typed ` +
-              `search contract\n`,
-          )
-        }
-      }
-
-      routes.push({
+      const route: AdminRoutesModuleRoute = {
         constName: `${toPascalCase(contribution.id)}Route`,
         routeId: contribution.id,
         path: contribution.path,
-        searchSchemaIdent,
-      })
+        searchSchemaIdent: schemaIdentFor(contribution, entry),
+      }
+
+      if (contribution.children !== null) {
+        // Nested subtree: statically scanned children get literal child
+        // routes (and typed-link entries) plus a slot on the runtime
+        // binding's exclude list; children the scan cannot resolve are left
+        // to `adminExtensionChildRoutes` at runtime.
+        const children: AdminRoutesModuleChildRoute[] = []
+        const excludeChildPaths: string[] = []
+        for (const child of contribution.children) {
+          if (child.id === null || child.path === null || !child.path.startsWith("/")) {
+            ctx.stderr(
+              `[admin-generate] routes: note — a ${entry.importSpec} child contribution of ` +
+                `${contribution.id} is not statically resolvable; left to the runtime ` +
+                `child binding\n`,
+            )
+            continue
+          }
+          // Excluded even when skipped below: the runtime binding must never
+          // double-bind a statically known child path.
+          excludeChildPaths.push(child.path)
+          if (!isImplementedContribution(child)) {
+            metadataOnly++
+            continue
+          }
+          if (child.path !== "/") {
+            const childProbe = probeRouteFiles(`${contribution.path}${child.path}`)
+            if (childProbe === null) continue
+            supersededFiles.push(...childProbe.superseded)
+          }
+          children.push({
+            constName: `${toPascalCase(child.id)}Route`,
+            routeId: child.id,
+            path: child.path,
+            searchSchemaIdent: schemaIdentFor(child, entry),
+          })
+        }
+        route.children = children
+        route.excludeChildPaths = excludeChildPaths
+        const subtreeComment = entry.subtreeComments?.[contribution.id]
+        if (subtreeComment !== undefined) route.subtreeComment = subtreeComment
+      }
+
+      routes.push(route)
     }
 
     if (routes.length > 0) {
       sections.push({
-        extensionId: scanExtensionId(source) ?? entry.domain,
+        extensionId: entry.extensionId,
         importSpec: entry.importSpec,
         routes,
       })
@@ -370,7 +486,12 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
   sections.sort((a, b) =>
     a.extensionId < b.extensionId ? -1 : a.extensionId > b.extensionId ? 1 : 0,
   )
-  const routeCount = sections.reduce((sum, section) => sum + section.routes.length, 0)
+  const routeCount = sections.reduce(
+    (sum, section) =>
+      sum +
+      section.routes.reduce((routeSum, route) => routeSum + 1 + (route.children?.length ?? 0), 0),
+    0,
+  )
 
   if (routeCount === 0) {
     const stale = existsSync(outPath) ? readFileSync(outPath, "utf8") : null
@@ -397,7 +518,7 @@ function generateRoutesModule(options: GenerateRoutesModuleOptions): CommandResu
     }
     ctx.stdout(
       `[admin-generate] routes: no implemented extension route contributions across ` +
-        `${found.length} admin entries — nothing to emit\n`,
+        `${routesEntries.length} admin entries — nothing to emit\n`,
     )
     return 0
   }
@@ -607,6 +728,9 @@ function generateDestinationsModule(options: GenerateDestinationsModuleOptions):
  * Per contribution:
  * - no statically resolvable id/path → note, skipped (the generator only
  *   trusts what it can read without executing the entry)
+ * - carries `redirectTo` or nested `children` → skipped (module-only
+ *   concepts; migrate to the code-assembled module). The built-in core
+ *   entry is likewise module-only and never emits thin files.
  * - path contains `$param` segments → skipped, hand-written hosts bind params
  * - no `component` → skipped (thin files cannot bind lazy `page` modules —
  *   migrate to the code-assembled module for those)
@@ -625,6 +749,7 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
   let ejected = 0
   let paramSkipped = 0
   let metadataOnly = 0
+  let moduleOnly = 0
   let drift = 0
 
   const found = foundEntries(results)
@@ -646,6 +771,13 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
               contribution.rawPath === null ? "" : `: path ${contribution.rawPath}`
             })\n`,
         )
+        continue
+      }
+      // Redirect and nested-children contributions are module-only concepts
+      // (beforeLoad redirects / addChildren subtrees) — thin files cannot
+      // express them; migrate to the code-assembled module.
+      if (contribution.hasRedirectTo || contribution.children !== null) {
+        moduleOnly++
         continue
       }
       if (contribution.path.includes("$")) {
@@ -723,7 +855,8 @@ function generateRouteFiles(options: GenerateRouteFilesOptions): CommandResult {
     `[admin-generate] routes: ${eligible} zero-prop route(s) across ${found.length} admin ` +
       `entries — ${check ? `${upToDate} up to date, ${drift} drifted` : `${written} written, ${upToDate} up to date`}, ` +
       `${ejected} ejected, ${paramSkipped} param route(s) and ${metadataOnly} metadata-only ` +
-      `contribution(s) left to hand-written hosts\n`,
+      `contribution(s) left to hand-written hosts` +
+      `${moduleOnly > 0 ? `, ${moduleOnly} redirect/children contribution(s) left to the code-assembled module` : ""}\n`,
   )
   return check && drift > 0 ? 1 : 0
 }

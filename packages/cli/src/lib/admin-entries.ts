@@ -216,7 +216,7 @@ function readExportsMap(pkgJsonPath: string): unknown {
  * the subpath is not exported. Wildcard patterns are not expanded — the admin
  * entry convention is an explicit `"./admin"` key.
  */
-function exportsTarget(exportsMap: unknown, subpath: string): string | null {
+export function exportsTarget(exportsMap: unknown, subpath: string): string | null {
   if (exportsMap === null || exportsMap === undefined) return null
   if (typeof exportsMap === "string") {
     return subpath === "." ? exportsMap : null
