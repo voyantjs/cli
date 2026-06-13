@@ -51,9 +51,9 @@
   "dependencies": {
     "@voyantjs/cloud-sdk": "^0.6.1",
     "@voyantjs/core": "^0.18.0",
-    "@voyantjs/workflows": "^0.18.0",
-    "@voyantjs/workflows-orchestrator": "^0.18.0",
-    "@voyantjs/workflows-orchestrator-node": "^0.18.0",
+    "@voyantjs/workflows": "^0.107.9",
+    "@voyantjs/workflows-orchestrator": "^0.107.9",
+    "@voyantjs/workflows-orchestrator-node": "^0.107.9",
     "esbuild": "^0.28.0",
     "tar": "^7.4.3"
   },

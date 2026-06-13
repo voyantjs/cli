@@ -30,14 +30,14 @@ importers:
         specifier: ^0.18.0
         version: 0.18.0
       '@voyantjs/workflows':
-        specifier: ^0.18.0
-        version: 0.18.0
+        specifier: ^0.107.9
+        version: 0.107.9
       '@voyantjs/workflows-orchestrator':
-        specifier: ^0.18.0
-        version: 0.18.0
+        specifier: ^0.107.9
+        version: 0.107.9
       '@voyantjs/workflows-orchestrator-node':
-        specifier: ^0.18.0
-        version: 0.18.0
+        specifier: ^0.107.9
+        version: 0.107.9
       esbuild:
         specifier: ^0.28.0
         version: 0.28.0
@@ -567,17 +567,14 @@ packages:
   '@voyantjs/core@0.18.0':
     resolution: {integrity: sha512-LGWoE07g9ECc/QBhXL14oKMurWheCBf0cAMXq55AIBit2uX0uy2vZJY4qAFD/l2+RiAgNGvedG6STlyOnib3lQ==}
 
-  '@voyantjs/workflows-errors@0.18.0':
-    resolution: {integrity: sha512-0ZQWENBsz78arcD+h9x28Pe8GytyNAumdW7PYqd++87U8W1+OWelDhWJirQaHHiXCV4AKtg+b2POKThOQe0Hog==}
+  '@voyantjs/workflows-orchestrator-node@0.107.9':
+    resolution: {integrity: sha512-tKrApkNjVeFxft97zLdbhRS+U0U0QjXcmTm3kMPOeWI7izpWcizCsaALlwwzbGkzy1ZFZ2RVC4W/NidViQ3bHw==}
 
-  '@voyantjs/workflows-orchestrator-node@0.18.0':
-    resolution: {integrity: sha512-P5xKtpvQps5vM6qAWIAhkTnZEXxbLpP7endWcTTpqceyXpnxIYxyp9KEt0VOXw4TQZizdCLg84+LXpvygYsw5g==}
+  '@voyantjs/workflows-orchestrator@0.107.9':
+    resolution: {integrity: sha512-jeVc8ffchz2P7qQewMttq/T18OydwbjBjeLF+TltTx6zVhXo2S73GSFRiK6l2elnzM/O+eOO85WgeYs/iBgs6g==}
 
-  '@voyantjs/workflows-orchestrator@0.18.0':
-    resolution: {integrity: sha512-R/9sD6yXbeS67qzjsc6fKVF50OU6bYdPjlwXvA4fT83CYjYOGPq01wYKdsdNTJgjCGT2TyUlD77Fr9GJNjidwQ==}
-
-  '@voyantjs/workflows@0.18.0':
-    resolution: {integrity: sha512-OEN34EAhaqmJGLG0Zw8vMcj1EH/DTjbLS8Olx9GLLjJpCjU9uLgw4lj2PjfyKTe+7lDKQaQ5ihPaSeyg1yhzEQ==}
+  '@voyantjs/workflows@0.107.9':
+    resolution: {integrity: sha512-qtVL41BgXACLq67RsDR+pe7X0xLOP4sajWJ4jF826Uyt5hgJ7L56mFexmc25GCOPoanCSlD0fHeQNybaC440KA==}
     peerDependencies:
       zod: ^3.23.0 || ^4.0.0
     peerDependenciesMeta:
@@ -1771,12 +1768,10 @@ snapshots:
 
   '@voyantjs/core@0.18.0': {}
 
-  '@voyantjs/workflows-errors@0.18.0': {}
-
-  '@voyantjs/workflows-orchestrator-node@0.18.0':
+  '@voyantjs/workflows-orchestrator-node@0.107.9':
     dependencies:
-      '@voyantjs/workflows': 0.18.0
-      '@voyantjs/workflows-orchestrator': 0.18.0
+      '@voyantjs/workflows': 0.107.9
+      '@voyantjs/workflows-orchestrator': 0.107.9
       drizzle-orm: 0.45.2(pg@8.20.0)
       pg: 8.20.0
     transitivePeerDependencies:
@@ -1811,15 +1806,13 @@ snapshots:
       - sqlite3
       - zod
 
-  '@voyantjs/workflows-orchestrator@0.18.0':
+  '@voyantjs/workflows-orchestrator@0.107.9':
     dependencies:
-      '@voyantjs/workflows': 0.18.0
+      '@voyantjs/workflows': 0.107.9
     transitivePeerDependencies:
       - zod
 
-  '@voyantjs/workflows@0.18.0':
-    dependencies:
-      '@voyantjs/workflows-errors': 0.18.0
+  '@voyantjs/workflows@0.107.9': {}
 
   ansi-colors@4.1.3: {}
 
